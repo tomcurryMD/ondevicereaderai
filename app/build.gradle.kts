@@ -24,21 +24,15 @@ android {
 
     /*
      * ABI splits — produces one APK per architecture.
-     *
-     * For Play Store: publish as Android App Bundle (AAB) instead of APKs.
-     *   ./gradlew :app:bundleRelease
-     * The AAB automatically serves the right native libs per device (~20-25 MB
-     * per install instead of 86 MB universal).
-     *
-     * For local testing you can still build a universal debug APK:
-     *   ./gradlew :app:assembleDebug
+     * For Play Store: publish as AAB (./gradlew :app:bundleRelease).
+     * For local testing: ./gradlew :app:assembleDebug
      */
     splits {
         abi {
             isEnable = true
             reset()
             include("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-            isUniversalApk = true // universal fallback for sideloading / debug
+            isUniversalApk = true
         }
     }
 
@@ -74,11 +68,24 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            // Exclude duplicate XML parser classes that conflict with Android's built-in
+            excludes += "META-INF/DEPENDENCIES"
+            excludes += "META-INF/LICENSE"
+            excludes += "META-INF/NOTICE"
         }
         jniLibs {
             useLegacyPackaging = true
         }
     }
+}
+
+// Exclude kxml2/xmlpull globally — Android has these built in and they cause
+// R8 "duplicate class" errors during release builds
+configurations.all {
+    exclude(group = "xmlpull", module = "xmlpull")
+    exclude(group = "net.sf.kxml", module = "kxml2")
+    exclude(group = "xpp3", module = "xpp3")
+    exclude(group = "xpp3", module = "xpp3_min")
 }
 
 ksp {
@@ -112,11 +119,13 @@ dependencies {
     // Coil for image loading
     implementation("io.coil-kt:coil-compose:2.7.0")
 
-    // ePub parsing
+    // ePub parsing — exclude XML parser libs that duplicate Android builtins
     implementation("org.jsoup:jsoup:1.18.3")
     implementation("nl.siegmann.epublib:epublib-core:3.1") {
         exclude(group = "org.slf4j")
         exclude(group = "xmlpull")
+        exclude(group = "net.sf.kxml")
+        exclude(group = "xpp3")
     }
     implementation("org.slf4j:slf4j-android:1.7.36")
 

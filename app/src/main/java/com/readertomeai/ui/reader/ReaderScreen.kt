@@ -3,6 +3,7 @@ package com.readertomeai.ui.reader
 import android.annotation.SuppressLint
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.animation.*
@@ -183,7 +184,7 @@ fun ReaderScreen(
             BookmarksDrawer(
                 bookmarks = uiState.bookmarks,
                 onBookmarkClick = { bookmark ->
-                    viewModel.goToChapter(bookmark.chapterIndex)
+                    viewModel.goToBookmark(bookmark)
                     viewModel.hideBookmarks()
                 },
                 onBookmarkDelete = { viewModel.removeBookmark(it) },
@@ -252,6 +253,20 @@ fun ReaderWebView(
                     override fun shouldOverrideUrlLoading(
                         view: WebView?, request: WebResourceRequest?
                     ): Boolean = true // Block ALL navigation
+
+                    // Block ALL remote resource loads (images, CSS, fonts from http/https)
+                    // Only allow data: URIs (our inlined base64 images) and local assets
+                    override fun shouldInterceptRequest(
+                        view: WebView?, request: WebResourceRequest?
+                    ): WebResourceResponse? {
+                        val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+                        // Allow data: URIs (base64 inlined images)
+                        if (url.startsWith("data:")) return super.shouldInterceptRequest(view, request)
+                        // Allow local asset URLs
+                        if (url.startsWith("file:///android_asset/")) return super.shouldInterceptRequest(view, request)
+                        // Block everything else (http, https, file, ftp, etc.)
+                        return WebResourceResponse("text/plain", "UTF-8", null)
+                    }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)

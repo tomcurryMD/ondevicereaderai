@@ -25,6 +25,9 @@ class VoiceManagerViewModel : ViewModel() {
     val downloadProgress = ttsEngine.downloadProgress
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
+    private val _downloadError = MutableStateFlow<String?>(null)
+    val downloadError: StateFlow<String?> = _downloadError
+
     init {
         refreshVoices()
     }
@@ -36,17 +39,28 @@ class VoiceManagerViewModel : ViewModel() {
     fun downloadVoice(voice: VoiceModel) {
         viewModelScope.launch {
             _downloadingVoiceId.value = voice.id
-            val success = ttsEngine.downloadVoice(voice)
-            _downloadingVoiceId.value = null
-            if (success) {
-                refreshVoices()
-                // Auto-select if first voice
-                val downloaded = ttsEngine.getDownloadedVoices().filter { it.isDownloaded }
-                if (downloaded.size == 1) {
-                    selectVoice(voice.id)
+            _downloadError.value = null
+            try {
+                val success = ttsEngine.downloadVoice(voice)
+                _downloadingVoiceId.value = null
+                if (success) {
+                    refreshVoices()
+                    val downloaded = ttsEngine.getDownloadedVoices().filter { it.isDownloaded }
+                    if (downloaded.size == 1) {
+                        selectVoice(voice.id)
+                    }
+                } else {
+                    _downloadError.value = "Download failed for ${voice.name}. Check your internet connection and try again."
                 }
+            } catch (e: Exception) {
+                _downloadingVoiceId.value = null
+                _downloadError.value = "Download failed: ${e.message ?: "Unknown error"}. Tap to retry."
             }
         }
+    }
+
+    fun clearError() {
+        _downloadError.value = null
     }
 
     fun selectVoice(voiceId: String) {

@@ -31,6 +31,21 @@ fun VoiceManagerScreen(
     val selectedVoiceId by viewModel.selectedVoiceId.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val downloadingVoiceId by viewModel.downloadingVoiceId.collectAsState()
+    val downloadError by viewModel.downloadError.collectAsState()
+
+    // Show error dialog
+    downloadError?.let { error ->
+        AlertDialog(
+            onDismissRequest = { viewModel.clearError() },
+            title = { Text("Download Failed") },
+            text = { Text(error) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.clearError() }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
 
     Scaffold(
         topBar = {

@@ -4,7 +4,7 @@
 OnDeviceReaderAI
 
 ## Short Description (80 chars max)
-Read ePub, PDF & HTML aloud with free, natural AI voices — 100% offline & private
+Read ePub, PDF & HTML aloud with free, natural AI voices — Read aloud with free, natural AI voices. Offline & private.
 
 ## Full Description (4000 chars max)
 
@@ -16,7 +16,7 @@ Unlike robotic system TTS, OnDeviceReaderAI uses Piper neural text-to-speech pow
 📖 READ ANYTHING
 Open ePub books, PDF documents, and HTML files directly from your device. Import from your file manager, or open files from other apps. OnDeviceReaderAI renders your content beautifully with customizable themes, fonts, and spacing.
 
-🔒 100% PRIVATE & OFFLINE
+🔒 PRIVATE & OFFLINE
 Your books never leave your device. All AI processing happens locally — no cloud servers, no data collection, no accounts. Once you download a voice model, the entire app works without internet.
 
 ✨ POLISHED READING EXPERIENCE
@@ -78,7 +78,7 @@ Everyone
 curry.tom.e@gmail.com
 
 ## Privacy Policy URL
-(Host PRIVACY_POLICY.md on GitHub Pages or your website and put the URL here)
+https://tomcurrymd.github.io/ondevicereaderai/privacy-policy.html
 
 ---
 

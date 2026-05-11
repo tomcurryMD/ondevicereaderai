@@ -14,6 +14,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.content.Intent
+import android.net.Uri
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.readertomeai.BuildConfig
@@ -106,7 +109,7 @@ fun SettingsScreen(
 
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text(
-                        "A free ePub reader with AI-powered natural text-to-speech. " +
+                        "A free document reader with AI-powered natural text-to-speech. " +
                         "Your books, your device, no cloud required.",
                         fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -119,6 +122,17 @@ fun SettingsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
                     )
                 }
+
+                val context = LocalContext.current
+                SettingsItem(
+                    icon = Icons.Outlined.PrivacyTip,
+                    title = "Privacy Policy",
+                    subtitle = "No data collection, no tracking",
+                    onClick = {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://tomcurrymd.github.io/ondevicereaderai/privacy-policy.html"))
+                        context.startActivity(intent)
+                    }
+                )
             }
 
             Spacer(modifier = Modifier.height(32.dp))

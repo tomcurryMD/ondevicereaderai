@@ -177,6 +177,20 @@ class ReaderViewModel : ViewModel() {
     fun nextChapter() = goToChapter(_uiState.value.currentChapter + 1)
     fun previousChapter() = goToChapter(_uiState.value.currentChapter - 1)
 
+    /** Navigate to a bookmark, restoring both chapter and scroll position */
+    fun goToBookmark(bookmark: com.readertomeai.data.model.Bookmark) {
+        if (bookmark.chapterIndex < 0 || bookmark.chapterIndex >= _uiState.value.totalChapters) return
+        ttsEngine.stop()
+        _uiState.update { it.copy(savedScrollPosition = bookmark.position) }
+        loadChapterHtml(bookmark.chapterIndex)
+        saveProgress(bookmark.chapterIndex, bookmark.position)
+        // Scroll to position after page loads via JS
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(500) // wait for WebView to render
+            evaluateJavascript?.invoke("scrollToProgress(${bookmark.position});")
+        }
+    }
+
     fun onScrollProgress(progress: Float) {
         currentScrollProgress = progress
         val state = _uiState.value
@@ -286,11 +300,23 @@ class ReaderViewModel : ViewModel() {
             }
             ctx.startForegroundService(intent)
 
+            // Read TTS display settings
+            val shouldHighlight = settings.highlightDuringTts.first()
+            val shouldAutoScroll = settings.autoScrollDuringTts.first()
+
             ttsEngine.speak(
                 text = text,
                 onSentenceStart = { _, start, end ->
-                    // Highlight the current sentence in the WebView and scroll to it
-                    evaluateJavascript?.invoke("highlightSentence($start, $end);")
+                    if (shouldHighlight) {
+                        evaluateJavascript?.invoke("highlightSentence($start, $end);")
+                    } else if (shouldAutoScroll) {
+                        // Auto-scroll without highlighting — just scroll to the sentence
+                        evaluateJavascript?.invoke(
+                            "var el=document.body;var total=el.scrollHeight-window.innerHeight;" +
+                            "var pos=$start/el.textContent.length*total;" +
+                            "window.scrollTo({top:pos,behavior:'smooth'});"
+                        )
+                    }
                 },
                 onComplete = {
                     if (state.currentChapter < state.totalChapters - 1) {

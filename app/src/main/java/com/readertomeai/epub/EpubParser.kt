@@ -105,6 +105,8 @@ class EpubParser(private val context: Context) {
             // Inline images as base64 data URIs so they render without file access
             val cleanDoc = Jsoup.parseBodyFragment(cleanBody)
             resolveImages(cleanDoc, book)
+            // Strip any remaining remote resource references for privacy
+            stripRemoteResources(cleanDoc)
 
             val plainText = cleanDoc.text()
 
@@ -159,6 +161,26 @@ class EpubParser(private val context: Context) {
         val filename = href.substringAfterLast("/")
         return book.resources.all.firstOrNull {
             it.href.endsWith(filename)
+        }
+    }
+
+    /**
+     * Remove any remaining remote resource references (http/https URLs in src, href, etc.)
+     * to prevent privacy leaks from book content loading external resources.
+     */
+    private fun stripRemoteResources(doc: org.jsoup.nodes.Document) {
+        // Strip remote images
+        doc.select("img[src~=^https?://]").forEach { it.remove() }
+        // Strip remote stylesheets
+        doc.select("link[href~=^https?://]").forEach { it.remove() }
+        // Strip remote audio/video
+        doc.select("audio[src~=^https?://], video[src~=^https?://], source[src~=^https?://]").forEach { it.remove() }
+        // Strip any element with background-image pointing to remote URL
+        doc.select("[style*=url]").forEach { el ->
+            val style = el.attr("style")
+            if (style.contains("http://") || style.contains("https://")) {
+                el.removeAttr("style")
+            }
         }
     }
 

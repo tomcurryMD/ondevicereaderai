@@ -1,6 +1,7 @@
 package com.readertomeai.tts
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -16,6 +17,8 @@ import com.readertomeai.ReaderToMeApp
 class TtsPlaybackService : Service() {
 
     private var mediaSession: MediaSessionCompat? = null
+    private var currentBookTitle: String = "Reading aloud"
+    private var isPlaying: Boolean = true
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -25,11 +28,15 @@ class TtsPlaybackService : Service() {
             setCallback(object : MediaSessionCompat.Callback() {
                 override fun onPause() {
                     ReaderToMeApp.instance.ttsEngine.pause()
+                    isPlaying = false
                     updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                    rebuildNotification()
                 }
                 override fun onPlay() {
                     ReaderToMeApp.instance.ttsEngine.resume()
+                    isPlaying = true
                     updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                    rebuildNotification()
                 }
                 override fun onStop() {
                     handleStop()
@@ -42,17 +49,22 @@ class TtsPlaybackService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val bookTitle = intent.getStringExtra(EXTRA_BOOK_TITLE) ?: "Reading aloud"
-                startForeground(ReaderToMeApp.NOTIFICATION_ID, createNotification(bookTitle))
+                currentBookTitle = intent.getStringExtra(EXTRA_BOOK_TITLE) ?: "Reading aloud"
+                isPlaying = true
+                startForeground(ReaderToMeApp.NOTIFICATION_ID, createNotification())
                 updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
             }
             ACTION_PAUSE -> {
                 ReaderToMeApp.instance.ttsEngine.pause()
+                isPlaying = false
                 updatePlaybackState(PlaybackStateCompat.STATE_PAUSED)
+                rebuildNotification()
             }
             ACTION_RESUME -> {
                 ReaderToMeApp.instance.ttsEngine.resume()
+                isPlaying = true
                 updatePlaybackState(PlaybackStateCompat.STATE_PLAYING)
+                rebuildNotification()
             }
             ACTION_STOP -> {
                 handleStop()
@@ -62,11 +74,15 @@ class TtsPlaybackService : Service() {
     }
 
     private fun handleStop() {
-        // Stop TTS engine playback first
         ReaderToMeApp.instance.ttsEngine.stop()
         updatePlaybackState(PlaybackStateCompat.STATE_STOPPED)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    private fun rebuildNotification() {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(ReaderToMeApp.NOTIFICATION_ID, createNotification())
     }
 
     private fun updatePlaybackState(state: Int) {
@@ -83,7 +99,7 @@ class TtsPlaybackService : Service() {
         )
     }
 
-    private fun createNotification(bookTitle: String): Notification {
+    private fun createNotification(): Notification {
         val openIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
@@ -92,13 +108,26 @@ class TtsPlaybackService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val pauseIntent = Intent(this, TtsPlaybackService::class.java).apply {
-            action = ACTION_PAUSE
+        // Swap Pause/Resume action based on current state
+        val toggleAction = if (isPlaying) {
+            val pauseIntent = Intent(this, TtsPlaybackService::class.java).apply {
+                action = ACTION_PAUSE
+            }
+            val pausePending = PendingIntent.getService(
+                this, 1, pauseIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            NotificationCompat.Action(R.drawable.ic_headphones, "Pause", pausePending)
+        } else {
+            val resumeIntent = Intent(this, TtsPlaybackService::class.java).apply {
+                action = ACTION_RESUME
+            }
+            val resumePending = PendingIntent.getService(
+                this, 1, resumeIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            NotificationCompat.Action(R.drawable.ic_headphones, "Resume", resumePending)
         }
-        val pausePendingIntent = PendingIntent.getService(
-            this, 1, pauseIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
 
         val stopIntent = Intent(this, TtsPlaybackService::class.java).apply {
             action = ACTION_STOP
@@ -110,15 +139,15 @@ class TtsPlaybackService : Service() {
 
         return NotificationCompat.Builder(this, ReaderToMeApp.NOTIFICATION_CHANNEL_ID)
             .setContentTitle("OnDeviceReaderAI")
-            .setContentText("Reading: $bookTitle")
+            .setContentText(if (isPlaying) "Reading: $currentBookTitle" else "Paused: $currentBookTitle")
             .setSmallIcon(R.drawable.ic_headphones)
             .setContentIntent(pendingIntent)
-            .addAction(R.drawable.ic_headphones, "Pause", pausePendingIntent)
+            .addAction(toggleAction)
             .addAction(R.drawable.ic_stop, "Stop", stopPendingIntent)
             .setStyle(MediaStyle()
                 .setMediaSession(mediaSession?.sessionToken)
                 .setShowActionsInCompactView(0, 1))
-            .setOngoing(true)
+            .setOngoing(isPlaying)
             .setSilent(true)
             .build()
     }
