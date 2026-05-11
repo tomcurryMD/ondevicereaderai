@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background circle -->
+    <path
+        android:fillColor="#6C63FF"
+        android:pathData="M54,54m-40,0a40,40 0,1 1,80 0a40,40 0,1 1,-80 0"/>
+    <!-- Book icon -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M42,36 L42,72 L54,66 L66,72 L66,36 L42,36z"/>
+    <!-- Headphone arc -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeWidth="2.5"
+        android:strokeColor="#FFFFFF"
+        android:pathData="M38,55 C38,45 46,38 54,38 C62,38 70,45 70,55"
+        android:fillAlpha="0"
+        android:strokeAlpha="0.9"/>
+    <!-- Left earpiece -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,53 L40,53 L40,62 L36,62z"/>
+    <!-- Right earpiece -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M68,53 L72,53 L72,62 L68,62z"/>
+</vector>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <files-path name="tts_models" path="tts_models/" />
+    <cache-path name="epub_cache" path="epub_cache/" />
+    <external-files-path name="books" path="books/" />
+</paths>
