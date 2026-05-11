@@ -9,3 +9,6 @@
 .cxx
 local.properties
 /app/build
+
+# Large binary — download separately (see README)
+/app/libs/*.aar
