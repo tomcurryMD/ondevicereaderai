@@ -338,6 +338,15 @@ class DocumentParser(private val context: Context) {
         doc.select("[style]").forEach { el ->
             if (REMOTE_STYLE_URL.containsMatchIn(el.attr("style"))) el.removeAttr("style")
         }
+        removeDeadGenericLinks(doc)
+    }
+
+    private fun removeDeadGenericLinks(doc: org.jsoup.nodes.Document) {
+        doc.select("a:not([href])").forEach { link ->
+            if (link.text().trim().equals("open", ignoreCase = true)) {
+                link.remove()
+            }
+        }
     }
 
     private fun isRemoteReference(value: String): Boolean =
