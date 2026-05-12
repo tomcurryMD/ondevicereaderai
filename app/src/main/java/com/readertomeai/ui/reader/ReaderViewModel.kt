@@ -157,6 +157,7 @@ class ReaderViewModel : ViewModel() {
             // Initialize TTS
             viewModelScope.launch(Dispatchers.IO) {
                 settings.migrateTtsDefaultsIfNeeded()
+                ttsEngine.ensureBundledDefaultVoiceInstalled()
                 settings.ttsSpeed.first().let { speed ->
                     ttsEngine.speed = speed
                 }
@@ -700,7 +701,7 @@ class ReaderViewModel : ViewModel() {
         _uiState.update {
             it.copy(
                 error = null,
-                ttsStatusMessage = "Downloading ${voiceToDownload.name} voice..."
+                ttsStatusMessage = "Preparing ${voiceToDownload.name} voice..."
             )
         }
 

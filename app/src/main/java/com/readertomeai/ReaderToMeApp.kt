@@ -11,6 +11,7 @@ import com.readertomeai.tts.TtsEngine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class ReaderToMeApp : Application() {
@@ -35,6 +36,8 @@ class ReaderToMeApp : Application() {
         ttsEngine = TtsEngine(this)
         appScope.launch {
             settingsRepository.migrateTtsDefaultsIfNeeded()
+            ttsEngine.ensureBundledDefaultVoiceInstalled()
+            ttsEngine.initializeVoice(settingsRepository.selectedVoiceId.first())
         }
 
         createNotificationChannel()

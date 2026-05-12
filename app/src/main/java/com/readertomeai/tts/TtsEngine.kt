@@ -18,6 +18,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.*
@@ -77,6 +79,7 @@ private const val MAX_TTS_FRAGMENT_WORDS = 18
 private const val MAX_TTS_CHUNK_WORDS = MAX_TTS_FRAGMENT_WORDS
 private const val HUMAN_READER_TARGET_WORDS = 55
 private const val HUMAN_READER_MAX_WORDS = 80
+private const val BUNDLED_TTS_ASSET_DIR = "bundled_tts"
 
 class TtsEngine(private val context: Context) {
 
@@ -84,6 +87,7 @@ class TtsEngine(private val context: Context) {
     private var audioTrack: AudioTrack? = null
     private var mediaPlayer: MediaPlayer? = null
     private var speakJob: Job? = null
+    private val bundledDefaultInstallMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val generatorDispatcher = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "TtsGenerator").apply { isDaemon = true }
@@ -204,8 +208,46 @@ class TtsEngine(private val context: Context) {
         }
     }
 
+    suspend fun ensureBundledDefaultVoiceInstalled(): Boolean = bundledDefaultInstallMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val defaultVoice = AvailableVoices.voices.find { it.id == AvailableVoices.DEFAULT_VOICE_ID }
+                ?: return@withContext false
+            if (getDownloadedVoices().any { it.id == defaultVoice.id && it.isDownloaded }) {
+                return@withContext true
+            }
+
+            val assetPath = "$BUNDLED_TTS_ASSET_DIR/${defaultVoice.id}.tar.bz2"
+            if (!assetExists(assetPath)) {
+                return@withContext false
+            }
+
+            val voiceDir = File(modelsDir, defaultVoice.id)
+            try {
+                _downloadProgress.value = 0f
+                voiceDir.deleteRecursively()
+                voiceDir.mkdirs()
+                context.assets.open(assetPath).use { input ->
+                    extractTarBz2(input, voiceDir)
+                }
+                _downloadProgress.value = 1f
+                val installed = getDownloadedVoices().any { it.id == defaultVoice.id && it.isDownloaded }
+                _downloadProgress.value = null
+                installed
+            } catch (e: Exception) {
+                e.printStackTrace()
+                voiceDir.deleteRecursively()
+                _downloadProgress.value = null
+                false
+            }
+        }
+    }
+
     suspend fun downloadVoice(voice: VoiceModel): Boolean = withContext(Dispatchers.IO) {
         try {
+            if (voice.id == AvailableVoices.DEFAULT_VOICE_ID && ensureBundledDefaultVoiceInstalled()) {
+                return@withContext true
+            }
+
             _downloadProgress.value = 0f
 
             // Step 1: Download espeak-ng-data if not present (shared across all voices)
@@ -301,26 +343,8 @@ class TtsEngine(private val context: Context) {
             }
 
             // Extract tar.bz2
-            destDir.mkdirs()
-            val canonicalDestDir = destDir.canonicalFile
             FileInputStream(tempFile).use { fis ->
-                BZip2CompressorInputStream(fis).use { bzis ->
-                    TarArchiveInputStream(bzis).use { tar ->
-                        var entry = tar.nextTarEntry
-                        while (entry != null) {
-                            val outFile = safeArchiveOutput(canonicalDestDir, entry.name)
-                            if (entry.isDirectory) {
-                                outFile.mkdirs()
-                            } else {
-                                outFile.parentFile?.mkdirs()
-                                FileOutputStream(outFile).use { fos ->
-                                    tar.copyTo(fos)
-                                }
-                            }
-                            entry = tar.nextTarEntry
-                        }
-                    }
-                }
+                extractTarBz2(fis, destDir)
             }
             onProgress(1f)
         } finally {
@@ -328,6 +352,36 @@ class TtsEngine(private val context: Context) {
             tempFile.delete()
         }
     }
+
+    private fun extractTarBz2(input: InputStream, destDir: File) {
+        destDir.mkdirs()
+        val canonicalDestDir = destDir.canonicalFile
+        BZip2CompressorInputStream(input).use { bzis ->
+            TarArchiveInputStream(bzis).use { tar ->
+                var entry = tar.nextTarEntry
+                while (entry != null) {
+                    val outFile = safeArchiveOutput(canonicalDestDir, entry.name)
+                    if (entry.isDirectory) {
+                        outFile.mkdirs()
+                    } else {
+                        outFile.parentFile?.mkdirs()
+                        FileOutputStream(outFile).use { fos ->
+                            tar.copyTo(fos)
+                        }
+                    }
+                    entry = tar.nextTarEntry
+                }
+            }
+        }
+    }
+
+    private fun assetExists(assetPath: String): Boolean =
+        try {
+            context.assets.open(assetPath).use { }
+            true
+        } catch (_: IOException) {
+            false
+        }
 
     private fun safeArchiveOutput(destDir: File, entryName: String): File {
         val outFile = File(destDir, entryName).canonicalFile

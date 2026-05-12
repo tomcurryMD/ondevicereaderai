@@ -65,6 +65,10 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        noCompress += "bz2"
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
