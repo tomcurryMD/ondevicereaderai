@@ -6,6 +6,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
+import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
@@ -80,6 +81,7 @@ private const val MAX_TTS_CHUNK_WORDS = MAX_TTS_FRAGMENT_WORDS
 private const val HUMAN_READER_TARGET_WORDS = 55
 private const val HUMAN_READER_MAX_WORDS = 80
 private const val BUNDLED_TTS_ASSET_DIR = "bundled_tts"
+private const val TAG = "TtsEngine"
 
 class TtsEngine(private val context: Context) {
 
@@ -155,20 +157,31 @@ class TtsEngine(private val context: Context) {
             it.isFile && it.name == "voices.bin"
         }
 
-    private fun findKokoroLexicon(voiceDir: File): String? =
-        voiceDir.takeIf { it.exists() }?.walkTopDown()
+    private fun findKokoroLexicon(voiceDir: File): String? {
+        val files = voiceDir.takeIf { it.exists() }?.walkTopDown()
             ?.filter { it.isFile && it.name.startsWith("lexicon-") && it.extension == "txt" }
-            ?.sortedByDescending { file ->
-                when (file.name) {
-                    "lexicon-us-en.txt" -> 3
-                    "lexicon-gb-en.txt" -> 2
-                    "lexicon-zh.txt" -> 1
-                    else -> 0
+            ?.associateBy { it.name }
+            ?: return null
+
+        val preferred = listOf("lexicon-us-en.txt", "lexicon-zh.txt", "lexicon-gb-en.txt")
+            .mapNotNull { files[it] }
+        val selected = preferred.ifEmpty { files.values.sortedBy { it.name } }
+        return selected.joinToString(",") { it.absolutePath }.takeIf { it.isNotBlank() }
+    }
+
+    private fun findKokoroDictDir(voiceDir: File): File? =
+        voiceDir.takeIf { it.exists() }?.walkTopDown()?.firstOrNull {
+            it.isDirectory && it.name == "dict" && !it.listFiles().isNullOrEmpty()
+        }
+
+    private fun findKokoroRuleFsts(voiceDir: File): String =
+        listOf("date-zh.fst", "phone-zh.fst", "number-zh.fst")
+            .mapNotNull { name ->
+                voiceDir.takeIf { it.exists() }?.walkTopDown()?.firstOrNull {
+                    it.isFile && it.name == name
                 }
             }
-            ?.take(2)
-            ?.joinToString(",") { it.absolutePath }
-            ?.takeIf { it.isNotBlank() }
+            .joinToString(",") { it.absolutePath }
 
     private fun findEspeakDataDir(): File? =
         modelsDir.walkTopDown().firstOrNull {
@@ -406,6 +419,13 @@ class TtsEngine(private val context: Context) {
         return try {
             _state.value = TtsState.LOADING
 
+            val voiceDir = File(modelsDir, voice.id)
+            val ruleFsts = if (voice.engine == VoiceEngine.KOKORO) {
+                findKokoroRuleFsts(voiceDir)
+            } else {
+                ""
+            }
+
             val modelConfig = when (voice.engine) {
                 VoiceEngine.PIPER_VITS -> OfflineTtsModelConfig(
                     vits = OfflineTtsVitsModelConfig(
@@ -424,6 +444,7 @@ class TtsEngine(private val context: Context) {
                         tokens = voice.localTokensPath!!,
                         dataDir = voice.localDataDir!!,
                         lexicon = voice.localLexiconPath.orEmpty(),
+                        dictDir = findKokoroDictDir(voiceDir)?.absolutePath.orEmpty(),
                         lengthScale = 1.0f / speed
                     ),
                     numThreads = 4,
@@ -431,7 +452,11 @@ class TtsEngine(private val context: Context) {
                 )
             }
 
-            val config = OfflineTtsConfig(model = modelConfig)
+            val config = OfflineTtsConfig(
+                model = modelConfig,
+                ruleFsts = ruleFsts,
+                maxNumSentences = 1
+            )
 
             tts?.release()
             tts = OfflineTts(null, config)
@@ -439,6 +464,7 @@ class TtsEngine(private val context: Context) {
             _state.value = TtsState.IDLE
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize voice: $voiceId", e)
             e.printStackTrace()
             _state.value = TtsState.IDLE
             false

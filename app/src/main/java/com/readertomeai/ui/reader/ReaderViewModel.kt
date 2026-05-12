@@ -518,7 +518,15 @@ class ReaderViewModel : ViewModel() {
         }
 
         if (!humanVoiceReady) {
-            _uiState.update { it.copy(ttsStatusMessage = "Could not prepare Human Reader model. Check connection.") }
+            val downloaded = withContext(Dispatchers.IO) {
+                ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
+            }
+            val message = if (downloaded) {
+                "Human Reader model is downloaded but could not start. Try restarting the app."
+            } else {
+                "Could not download Human Reader model. Check connection and free storage."
+            }
+            _uiState.update { it.copy(ttsStatusMessage = message) }
             return
         }
 
