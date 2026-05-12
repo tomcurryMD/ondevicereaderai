@@ -8,6 +8,10 @@ import com.readertomeai.data.database.AppDatabase
 import com.readertomeai.data.repository.BookRepository
 import com.readertomeai.data.repository.SettingsRepository
 import com.readertomeai.tts.TtsEngine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class ReaderToMeApp : Application() {
 
@@ -19,6 +23,7 @@ class ReaderToMeApp : Application() {
         private set
     lateinit var ttsEngine: TtsEngine
         private set
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
@@ -28,6 +33,9 @@ class ReaderToMeApp : Application() {
         bookRepository = BookRepository(database.bookDao(), this)
         settingsRepository = SettingsRepository(this)
         ttsEngine = TtsEngine(this)
+        appScope.launch {
+            settingsRepository.migrateTtsDefaultsIfNeeded()
+        }
 
         createNotificationChannel()
     }

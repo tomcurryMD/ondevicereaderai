@@ -7,6 +7,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.animation.*
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -34,6 +35,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.readertomeai.tts.TtsState
 import com.readertomeai.ui.theme.*
+import java.io.ByteArrayInputStream
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,9 +47,16 @@ fun ReaderScreen(
     val uiState by viewModel.uiState.collectAsState()
     val ttsState by viewModel.ttsState.collectAsState()
     val ttsProgress by viewModel.ttsProgress.collectAsState()
+    val ttsDownloadProgress by viewModel.ttsEngine.downloadProgress.collectAsState()
 
     LaunchedEffect(bookId) {
         viewModel.loadBook(bookId)
+    }
+
+    LaunchedEffect(ttsState) {
+        if (ttsState == TtsState.IDLE) {
+            viewModel.clearTtsHighlights()
+        }
     }
 
     if (uiState.isLoading) {
@@ -74,7 +83,12 @@ fun ReaderScreen(
         return
     }
 
-    val readingBg = when (uiState.readingTheme) {
+    val systemDark = isSystemInDarkTheme()
+    val effectiveReadingTheme = when (uiState.readingTheme) {
+        "system" -> if (systemDark) "dark" else "light"
+        else -> uiState.readingTheme
+    }
+    val readingBg = when (effectiveReadingTheme) {
         "dark" -> DarkReadingColors.background
         "sepia" -> SepiaReadingColors.background
         else -> LightReadingColors.background
@@ -95,6 +109,45 @@ fun ReaderScreen(
                 viewModel.evaluateJavascript = jsEvaluator
             }
         )
+
+        AnimatedVisibility(
+            visible = !uiState.showControls,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 16.dp, top = 48.dp)
+        ) {
+            SmallFloatingActionButton(
+                onClick = onBack,
+                containerColor = readingBg.copy(alpha = 0.95f),
+                contentColor = MaterialTheme.colorScheme.onSurface
+            ) {
+                Icon(Icons.Filled.Home, "Back to Library")
+            }
+        }
+
+        AnimatedVisibility(
+            visible = !uiState.showControls && uiState.ttsStatusMessage != null,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.inverseSurface,
+                contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+                shape = RoundedCornerShape(8.dp),
+                shadowElevation = 4.dp
+            ) {
+                Text(
+                    uiState.ttsStatusMessage.orEmpty(),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    fontSize = 13.sp
+                )
+            }
+        }
 
         // Top bar
         AnimatedVisibility(
@@ -121,7 +174,7 @@ fun ReaderScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                        Icon(Icons.Filled.Home, "Back to Library")
                     }
                 },
                 actions = {
@@ -156,6 +209,8 @@ fun ReaderScreen(
                 currentChapter = uiState.currentChapter,
                 totalChapters = uiState.totalChapters,
                 chapterTitle = uiState.chapterTitle,
+                statusMessage = uiState.ttsStatusMessage,
+                downloadProgress = ttsDownloadProgress,
                 onPlay = { viewModel.playTts() },
                 onPause = { viewModel.pauseTts() },
                 onResume = { viewModel.resumeTts() },
@@ -265,7 +320,7 @@ fun ReaderWebView(
                         // Allow local asset URLs
                         if (url.startsWith("file:///android_asset/")) return super.shouldInterceptRequest(view, request)
                         // Block everything else (http, https, file, ftp, etc.)
-                        return WebResourceResponse("text/plain", "UTF-8", null)
+                        return WebResourceResponse("text/plain", "UTF-8", ByteArrayInputStream(ByteArray(0)))
                     }
 
                     override fun onPageFinished(view: WebView?, url: String?) {
@@ -283,9 +338,13 @@ fun ReaderWebView(
                     }
 
                     @JavascriptInterface
-                    fun onTextSelected(text: String) {
+                    fun onTextSelected(text: String, startOffset: Int, endOffset: Int) {
                         val safe = text.take(5000)
-                        onTextSelected(safe, 0, safe.length)
+                        onTextSelected(
+                            safe,
+                            startOffset.coerceAtLeast(0),
+                            endOffset.coerceAtLeast(startOffset)
+                        )
                     }
                 }, "Android")
             }
@@ -309,6 +368,8 @@ fun TtsControlBar(
     currentChapter: Int,
     totalChapters: Int,
     chapterTitle: String,
+    statusMessage: String?,
+    downloadProgress: Float?,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -397,6 +458,26 @@ fun TtsControlBar(
                 Spacer(modifier = Modifier.width(16.dp))
                 IconButton(onClick = onNextChapter, enabled = currentChapter < totalChapters - 1) {
                     Icon(Icons.Filled.SkipNext, "Next Chapter", modifier = Modifier.size(28.dp))
+                }
+            }
+
+            if (statusMessage != null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    statusMessage,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (downloadProgress != null) {
+                    LinearProgressIndicator(
+                        progress = { downloadProgress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp)),
+                        color = Purple,
+                    )
                 }
             }
         }

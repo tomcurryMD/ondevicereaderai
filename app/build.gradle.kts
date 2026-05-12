@@ -121,6 +121,7 @@ dependencies {
 
     // ePub parsing — exclude XML parser libs that duplicate Android builtins
     implementation("org.jsoup:jsoup:1.18.3")
+    implementation("org.jspecify:jspecify:1.0.0")
     implementation("nl.siegmann.epublib:epublib-core:3.1") {
         exclude(group = "org.slf4j")
         exclude(group = "xmlpull")

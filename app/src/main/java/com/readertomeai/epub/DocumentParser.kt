@@ -35,6 +35,8 @@ class DocumentParser(private val context: Context) {
 
     companion object {
         private var pdfBoxInitialized = false
+        private val REMOTE_REFERENCE = Regex("""(?i)(https?:)?//.*""")
+        private val REMOTE_STYLE_URL = Regex("""(?i)url\(\s*['"]?\s*(https?:)?//""")
 
         fun detectType(filePath: String): DocumentType {
             val lower = filePath.lowercase()
@@ -71,7 +73,8 @@ class DocumentParser(private val context: Context) {
                 }
             });
 
-            function highlightSentence(startIdx, endIdx) {
+            function highlightSentence(startIdx, endIdx, shouldScroll) {
+                if (shouldScroll === undefined) shouldScroll = true;
                 clearTtsHighlights();
                 var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                 var currentOffset = 0;
@@ -88,7 +91,7 @@ class DocumentParser(private val context: Context) {
                         var span = document.createElement('span');
                         span.className = 'tts-highlight';
                         try { range.surroundContents(span); } catch(e) {}
-                        if (currentOffset <= startIdx) {
+                        if (shouldScroll && currentOffset <= startIdx) {
                             span.scrollIntoView({ behavior: 'smooth', block: 'center' });
                         }
                     }
@@ -109,10 +112,45 @@ class DocumentParser(private val context: Context) {
                 window.scrollTo(0, docHeight * progress);
             }
 
+            function scrollToTextOffset(offset) {
+                var textLength = Math.max(document.body.textContent.length, 1);
+                var docHeight = document.documentElement.scrollHeight - window.innerHeight;
+                var progress = Math.max(0, Math.min(1, offset / textLength));
+                window.scrollTo({ top: docHeight * progress, behavior: 'smooth' });
+            }
+
+            function getTextOffset(container, offset) {
+                try {
+                    var range = document.createRange();
+                    range.setStart(document.body, 0);
+                    range.setEnd(container, offset);
+                    return range.toString().length;
+                } catch(e) {}
+
+                var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                var currentOffset = 0;
+                var node;
+                while (node = walker.nextNode()) {
+                    if (node === container) {
+                        return currentOffset + offset;
+                    }
+                    currentOffset += node.textContent.length;
+                }
+                return currentOffset;
+            }
+
             document.addEventListener('selectionchange', function() {
                 var selection = window.getSelection();
-                if (selection && selection.toString().trim().length > 0) {
-                    if (typeof Android !== 'undefined') Android.onTextSelected(selection.toString());
+                if (selection && selection.rangeCount > 0 && selection.toString().trim().length > 0) {
+                    var range = selection.getRangeAt(0);
+                    var startOffset = getTextOffset(range.startContainer, range.startOffset);
+                    var endOffset = getTextOffset(range.endContainer, range.endOffset);
+                    if (startOffset > endOffset) {
+                        var temp = startOffset;
+                        startOffset = endOffset;
+                        endOffset = temp;
+                    }
+                    if (typeof Android !== 'undefined') Android.onTextSelected(selection.toString(), startOffset, endOffset);
                 }
             });
         """.trimIndent()
@@ -274,13 +312,36 @@ class DocumentParser(private val context: Context) {
         val safelist = org.jsoup.safety.Safelist.relaxed()
             .removeTags("script", "iframe", "object", "embed", "form", "input", "textarea", "button", "applet")
         val cleanHtml = Jsoup.clean(htmlContent ?: "", safelist)
+        val cleanDoc = Jsoup.parseBodyFragment(cleanHtml)
+        stripRemoteResources(cleanDoc)
         return ChapterContent(
             index = 0,
             title = htmlTitle,
-            htmlContent = cleanHtml,
+            htmlContent = cleanDoc.body().html(),
             plainText = htmlPlainText
         )
     }
+
+    private fun stripRemoteResources(doc: org.jsoup.nodes.Document) {
+        doc.select("[src], [href], [poster]").forEach { el ->
+            listOf("src", "href", "poster").forEach { attr ->
+                if (isRemoteReference(el.attr(attr))) {
+                    el.removeAttr(attr)
+                }
+            }
+        }
+        doc.select("[srcset]").forEach { el ->
+            if (el.attr("srcset").split(",").any { isRemoteReference(it.trim().substringBefore(" ")) }) {
+                el.removeAttr("srcset")
+            }
+        }
+        doc.select("[style]").forEach { el ->
+            if (REMOTE_STYLE_URL.containsMatchIn(el.attr("style"))) el.removeAttr("style")
+        }
+    }
+
+    private fun isRemoteReference(value: String): Boolean =
+        REMOTE_REFERENCE.matches(value.trim())
 
     fun getChapterHtmlForWebView(
         chapterIndex: Int, fontSize: Float, lineSpacing: Float,

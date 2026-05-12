@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -46,7 +47,11 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent)
 
         setContent {
-            ReaderToMeTheme {
+            val readingTheme by ReaderToMeApp.instance.settingsRepository.readingTheme.collectAsState(initial = "light")
+            val systemDark = isSystemInDarkTheme()
+            val useDarkTheme = readingTheme == "dark" || (readingTheme == "system" && systemDark)
+
+            ReaderToMeTheme(darkTheme = useDarkTheme) {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background

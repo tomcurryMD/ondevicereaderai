@@ -9,6 +9,8 @@ import com.readertomeai.epub.DocumentParser
 import com.readertomeai.tts.TtsPlaybackService
 import com.readertomeai.tts.TtsState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -36,7 +38,8 @@ data class ReaderUiState(
     val savedScrollPosition: Float = 0f,
     val selectedText: String = "",
     val selectedTextStart: Int = 0,
-    val selectedTextEnd: Int = 0
+    val selectedTextEnd: Int = 0,
+    val ttsStatusMessage: String? = null
 )
 
 class ReaderViewModel : ViewModel() {
@@ -55,6 +58,10 @@ class ReaderViewModel : ViewModel() {
 
     // Track last scroll position per chapter for bookmarks
     private var currentScrollProgress: Float = 0f
+    private var ttsResumeChapter: Int = -1
+    private var ttsResumeOffset: Int = 0
+    private var selectedPlaybackStartPending: Boolean = false
+    private var selectionResolveJob: Job? = null
 
     /**
      * Callback set by ReaderScreen to execute JS in the WebView.
@@ -105,14 +112,22 @@ class ReaderViewModel : ViewModel() {
             }
 
             val toc = withContext(Dispatchers.IO) { parser.getTableOfContents() }
+            val totalChapters = parser.getChapterCount()
+            val initialChapter = withContext(Dispatchers.IO) {
+                findReadableChapter(book.currentChapter, totalChapters)
+            }
+            val initialPosition = if (initialChapter == book.currentChapter) book.currentPosition else 0f
+            currentScrollProgress = initialPosition
+            ttsResumeChapter = initialChapter
+            ttsResumeOffset = 0
 
             _uiState.update {
                 it.copy(
                     book = book,
-                    totalChapters = parser.getChapterCount(),
+                    totalChapters = totalChapters,
                     tableOfContents = toc,
-                    currentChapter = book.currentChapter,
-                    savedScrollPosition = book.currentPosition
+                    currentChapter = initialChapter,
+                    savedScrollPosition = initialPosition
                 )
             }
 
@@ -132,6 +147,7 @@ class ReaderViewModel : ViewModel() {
 
             // Initialize TTS
             viewModelScope.launch(Dispatchers.IO) {
+                settings.migrateTtsDefaultsIfNeeded()
                 settings.ttsSpeed.first().let { speed ->
                     ttsEngine.speed = speed
                 }
@@ -140,10 +156,39 @@ class ReaderViewModel : ViewModel() {
                 }
             }
 
-            loadChapterHtml(book.currentChapter)
+            if (initialChapter != book.currentChapter) {
+                saveProgress(initialChapter, initialPosition)
+            }
+            loadChapterHtml(initialChapter)
             _uiState.update { it.copy(isLoading = false) }
         }
     }
+
+    private fun findReadableChapter(startIndex: Int, totalChapters: Int): Int {
+        if (totalChapters <= 0) return 0
+        val boundedStart = startIndex.coerceIn(0, totalChapters - 1)
+
+        for (index in boundedStart until totalChapters) {
+            if (hasSubstantialReadableText(index)) return index
+        }
+
+        for (index in 0 until boundedStart) {
+            if (hasSubstantialReadableText(index)) return index
+        }
+
+        for (index in boundedStart until totalChapters) {
+            if (parser.getPlainTextForChapter(index).isNotBlank()) return index
+        }
+
+        for (index in 0 until boundedStart) {
+            if (parser.getPlainTextForChapter(index).isNotBlank()) return index
+        }
+
+        return boundedStart
+    }
+
+    private fun hasSubstantialReadableText(chapterIndex: Int): Boolean =
+        parser.getPlainTextForChapter(chapterIndex).length >= MIN_READABLE_CHAPTER_CHARS
 
     private fun loadChapterHtml(chapterIndex: Int) {
         viewModelScope.launch {
@@ -169,6 +214,8 @@ class ReaderViewModel : ViewModel() {
     fun goToChapter(index: Int) {
         if (index < 0 || index >= _uiState.value.totalChapters) return
         ttsEngine.stop()
+        resetTtsResume()
+        currentScrollProgress = 0f
         _uiState.update { it.copy(savedScrollPosition = 0f) }
         loadChapterHtml(index)
         saveProgress(index, 0f)
@@ -181,6 +228,8 @@ class ReaderViewModel : ViewModel() {
     fun goToBookmark(bookmark: com.readertomeai.data.model.Bookmark) {
         if (bookmark.chapterIndex < 0 || bookmark.chapterIndex >= _uiState.value.totalChapters) return
         ttsEngine.stop()
+        resetTtsResume()
+        currentScrollProgress = bookmark.position
         _uiState.update { it.copy(savedScrollPosition = bookmark.position) }
         loadChapterHtml(bookmark.chapterIndex)
         saveProgress(bookmark.chapterIndex, bookmark.position)
@@ -201,8 +250,105 @@ class ReaderViewModel : ViewModel() {
     }
 
     fun onTextSelected(text: String, startOffset: Int, endOffset: Int) {
+        val chapter = _uiState.value.currentChapter
+        val safeStart = startOffset.coerceAtLeast(0)
+        val safeEnd = endOffset.coerceAtLeast(safeStart)
+        ttsResumeChapter = chapter
+        ttsResumeOffset = safeStart
+        selectedPlaybackStartPending = true
         _uiState.update {
-            it.copy(selectedText = text, selectedTextStart = startOffset, selectedTextEnd = endOffset)
+            it.copy(
+                selectedText = text,
+                selectedTextStart = safeStart,
+                selectedTextEnd = safeEnd,
+                ttsStatusMessage = "Playback will start from selected text."
+            )
+        }
+        selectionResolveJob?.cancel()
+        selectionResolveJob = viewModelScope.launch {
+            val resolvedRange = resolveSelectedTextRange(chapter, text, safeStart, safeEnd)
+            val currentState = _uiState.value
+            if (currentState.currentChapter == chapter && currentState.selectedText == text) {
+                ttsResumeChapter = chapter
+                ttsResumeOffset = resolvedRange.first
+                _uiState.update {
+                    it.copy(
+                        selectedTextStart = resolvedRange.first,
+                        selectedTextEnd = resolvedRange.second
+                    )
+                }
+            }
+        }
+        clearStatusMessageSoon("Playback will start from selected text.")
+    }
+
+    private suspend fun resolveSelectedTextRange(
+        chapter: Int,
+        selectedText: String,
+        approximateStart: Int,
+        approximateEnd: Int
+    ): Pair<Int, Int> {
+        val chapterText = withContext(Dispatchers.IO) {
+            parser.getPlainTextForChapter(chapter)
+        }
+        if (chapterText.isBlank()) return approximateStart to approximateEnd
+
+        val boundedStart = approximateStart.coerceIn(0, chapterText.length)
+        val normalizedSelection = normalizeSelectionText(selectedText)
+        if (normalizedSelection.isBlank()) return boundedStart to boundedStart
+
+        val resolvedStart = findClosestTextMatch(chapterText, normalizedSelection, boundedStart)
+            ?: boundedStart
+        val resolvedEnd = (resolvedStart + normalizedSelection.length).coerceIn(resolvedStart, chapterText.length)
+        return resolvedStart to resolvedEnd
+    }
+
+    private fun normalizeSelectionText(text: String): String =
+        text.replace(WHITESPACE, " ").trim()
+
+    private fun findClosestTextMatch(text: String, selection: String, approximateStart: Int): Int? {
+        val candidates = mutableListOf(selection)
+        if (selection.length > 160) candidates.add(selection.take(160))
+        if (selection.length > 80) candidates.add(selection.take(80))
+        if (selection.length > 40) candidates.add(selection.take(40))
+
+        candidates.map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+            .forEach { candidate ->
+                closestIndexOf(text, candidate, approximateStart, ignoreCase = false)?.let { return it }
+                closestIndexOf(text, candidate, approximateStart, ignoreCase = true)?.let { return it }
+            }
+
+        return null
+    }
+
+    private fun closestIndexOf(
+        text: String,
+        needle: String,
+        approximateStart: Int,
+        ignoreCase: Boolean
+    ): Int? {
+        var bestIndex: Int? = null
+        var bestDistance = Int.MAX_VALUE
+        var index = text.indexOf(needle, 0, ignoreCase)
+        while (index >= 0) {
+            val distance = kotlin.math.abs(index - approximateStart)
+            if (distance < bestDistance) {
+                bestIndex = index
+                bestDistance = distance
+            }
+            index = text.indexOf(needle, index + 1, ignoreCase)
+        }
+        return bestIndex
+    }
+
+    private fun clearStatusMessageSoon(message: String) {
+        viewModelScope.launch {
+            delay(3_000)
+            _uiState.update {
+                if (it.ttsStatusMessage == message) it.copy(ttsStatusMessage = null) else it
+            }
         }
     }
 
@@ -266,32 +412,36 @@ class ReaderViewModel : ViewModel() {
         viewModelScope.launch { repo.removeHighlight(highlight) }
     }
 
-    // ── TTS Controls ────────────────────────────────────────────────
+    // â”€â”€ TTS Controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fun playTts() {
         val state = _uiState.value
         val book = state.book ?: return
 
         viewModelScope.launch {
+            settings.migrateTtsDefaultsIfNeeded()
             ttsEngine.speed = settings.ttsSpeed.first()
-            if (ttsEngine.currentVoice.value == null) {
-                val selectedVoiceId = settings.selectedVoiceId.first()
-                val initialized = withContext(Dispatchers.IO) {
-                    ttsEngine.initializeVoice(selectedVoiceId)
-                }
+            val selectedVoiceId = settings.selectedVoiceId.first()
+            if (ttsEngine.currentVoice.value?.id != selectedVoiceId) {
+                val initialized = ensureVoiceReady()
                 if (!initialized) {
-                    _uiState.update {
-                        it.copy(error = "Download and select a voice model before using TTS.")
-                    }
                     return@launch
                 }
             }
-            _uiState.update { it.copy(error = null) }
+            _uiState.update { it.copy(error = null, ttsStatusMessage = null) }
 
             val text = withContext(Dispatchers.IO) {
                 parser.getPlainTextForChapter(state.currentChapter)
             }
             if (text.isBlank()) return@launch
+            val chapterForPlayback = state.currentChapter
+            val startOffset = resolveTtsStartOffset(chapterForPlayback, text)
+            selectedPlaybackStartPending = false
+            val textToSpeak = text.substring(startOffset)
+            if (textToSpeak.isBlank()) {
+                resetTtsResume()
+                return@launch
+            }
 
             val ctx = ReaderToMeApp.instance
             val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
@@ -305,24 +455,24 @@ class ReaderViewModel : ViewModel() {
             val shouldAutoScroll = settings.autoScrollDuringTts.first()
 
             ttsEngine.speak(
-                text = text,
+                text = textToSpeak,
                 onSentenceStart = { _, start, end ->
+                    val absoluteStart = (startOffset + start).coerceIn(0, text.length)
+                    val absoluteEnd = (startOffset + end).coerceIn(absoluteStart, text.length)
+                    rememberTtsPosition(chapterForPlayback, absoluteStart, text.length)
                     if (shouldHighlight) {
-                        evaluateJavascript?.invoke("highlightSentence($start, $end);")
+                        evaluateJavascript?.invoke("highlightSentence($absoluteStart, $absoluteEnd, $shouldAutoScroll);")
                     } else if (shouldAutoScroll) {
-                        // Auto-scroll without highlighting � just scroll to the sentence
-                        evaluateJavascript?.invoke(
-                            "var el=document.body;var total=el.scrollHeight-window.innerHeight;" +
-                            "var pos=$start/el.textContent.length*total;" +
-                            "window.scrollTo({top:pos,behavior:'smooth'});"
-                        )
+                        evaluateJavascript?.invoke("scrollToTextOffset($absoluteStart);")
                     }
                 },
                 onComplete = {
-                    if (state.currentChapter < state.totalChapters - 1) {
+                    if (chapterForPlayback < state.totalChapters - 1) {
+                        resetTtsResume()
                         nextChapter()
                         playTts()
                     } else {
+                        resetTtsResume()
                         stopTts()
                     }
                 }
@@ -330,12 +480,147 @@ class ReaderViewModel : ViewModel() {
         }
     }
 
-    fun pauseTts() = ttsEngine.pause()
-    fun resumeTts() = ttsEngine.resume()
+    private fun resolveTtsStartOffset(chapter: Int, text: String): Int {
+        if (text.isBlank()) return 0
+        val rawOffset = if (ttsResumeChapter == chapter && ttsResumeOffset > 0) {
+            ttsResumeOffset
+        } else {
+            (currentScrollProgress.coerceIn(0f, 1f) * text.length).toInt()
+        }
+        val boundedOffset = rawOffset.coerceIn(0, text.length)
+        if (boundedOffset >= text.lastIndex) return text.length
+        return clampToWordBoundary(text, boundedOffset)
+    }
+
+    private fun clampToWordBoundary(text: String, offset: Int): Int {
+        if (offset <= 0) return 0
+        if (offset >= text.lastIndex) return 0
+        var cursor = offset
+        while (cursor > 0 && !text[cursor - 1].isWhitespace()) {
+            cursor--
+        }
+        return cursor
+    }
+
+    private fun rememberTtsPosition(chapter: Int, absoluteStart: Int, textLength: Int) {
+        if (textLength <= 0) return
+        if (selectedPlaybackStartPending) return
+        ttsResumeChapter = chapter
+        ttsResumeOffset = absoluteStart.coerceIn(0, textLength - 1)
+        val progress = (ttsResumeOffset.toFloat() / textLength).coerceIn(0f, 1f)
+        currentScrollProgress = progress
+        saveProgress(chapter, progress)
+    }
+
+    private fun resetTtsResume() {
+        ttsResumeChapter = -1
+        ttsResumeOffset = 0
+        selectedPlaybackStartPending = false
+    }
+
+    private suspend fun ensureVoiceReady(): Boolean {
+        val selectedVoiceId = settings.selectedVoiceId.first()
+        val initialized = withContext(Dispatchers.IO) {
+            ttsEngine.initializeVoice(selectedVoiceId)
+        }
+        if (initialized) return true
+
+        val defaultVoice = AvailableVoices.voices.find { it.id == AvailableVoices.DEFAULT_VOICE_ID }
+            ?: AvailableVoices.voices.first()
+        val compactFallbackVoice = AvailableVoices.voices.find { it.id == AvailableVoices.COMPACT_FALLBACK_VOICE_ID }
+        if (selectedVoiceId != defaultVoice.id) {
+            val defaultInitialized = withContext(Dispatchers.IO) {
+                ttsEngine.initializeVoice(defaultVoice.id)
+            }
+            if (defaultInitialized) {
+                settings.setSelectedVoice(defaultVoice.id)
+                return true
+            }
+        }
+
+        val voiceToDownload = defaultVoice
+
+        _uiState.update {
+            it.copy(
+                error = null,
+                ttsStatusMessage = "Downloading ${voiceToDownload.name} voice..."
+            )
+        }
+
+        val downloadedAndInitialized = withContext(Dispatchers.IO) {
+            ttsEngine.downloadAndInitializeVoice(voiceToDownload)
+        }
+
+        if (downloadedAndInitialized) {
+            settings.setSelectedVoice(voiceToDownload.id)
+            _uiState.update { it.copy(ttsStatusMessage = null) }
+            return true
+        }
+
+        if (compactFallbackVoice != null && compactFallbackVoice.id != voiceToDownload.id) {
+            val compactInitialized = withContext(Dispatchers.IO) {
+                ttsEngine.initializeVoice(compactFallbackVoice.id)
+            }
+            if (compactInitialized) {
+                settings.setSelectedVoice(compactFallbackVoice.id)
+                _uiState.update { it.copy(ttsStatusMessage = null) }
+                return true
+            }
+
+            _uiState.update {
+                it.copy(
+                    error = null,
+                    ttsStatusMessage = "Downloading compact fallback voice..."
+                )
+            }
+            val compactDownloaded = withContext(Dispatchers.IO) {
+                ttsEngine.downloadAndInitializeVoice(compactFallbackVoice)
+            }
+            if (compactDownloaded) {
+                settings.setSelectedVoice(compactFallbackVoice.id)
+                _uiState.update { it.copy(ttsStatusMessage = null) }
+                return true
+            }
+        }
+
+        _uiState.update {
+            it.copy(
+                ttsStatusMessage = null,
+                error = "Could not prepare the default voice model. Please try again, or choose another voice in Settings."
+            )
+        }
+        return false
+    }
+
+    fun pauseTts() {
+        val ctx = ReaderToMeApp.instance
+        val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_PAUSE
+        }
+        ctx.startService(intent)
+    }
+
+    fun resumeTts() {
+        if (selectedPlaybackStartPending && ttsResumeChapter == _uiState.value.currentChapter) {
+            stopTts()
+            playTts()
+            return
+        }
+
+        val ctx = ReaderToMeApp.instance
+        val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_RESUME
+        }
+        ctx.startService(intent)
+    }
+
+    fun clearTtsHighlights() {
+        evaluateJavascript?.invoke("clearTtsHighlights();")
+    }
 
     fun stopTts() {
         ttsEngine.stop()
-        evaluateJavascript?.invoke("clearTtsHighlights();")
+        clearTtsHighlights()
         val ctx = ReaderToMeApp.instance
         val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
             action = TtsPlaybackService.ACTION_STOP
@@ -343,14 +628,54 @@ class ReaderViewModel : ViewModel() {
         ctx.startService(intent)
     }
 
-    fun setFontSize(size: Float) { viewModelScope.launch { settings.setFontSize(size) } }
-    fun setLineSpacing(spacing: Float) { viewModelScope.launch { settings.setLineSpacing(spacing) } }
-    fun setReadingTheme(theme: String) { viewModelScope.launch { settings.setReadingTheme(theme) } }
-    fun setFontFamily(family: String) { viewModelScope.launch { settings.setFontFamily(family) } }
+    fun setFontSize(size: Float) {
+        viewModelScope.launch {
+            settings.setFontSize(size)
+            _uiState.update { it.copy(fontSize = size) }
+            reloadCurrentChapterAppearance()
+        }
+    }
+
+    fun setLineSpacing(spacing: Float) {
+        viewModelScope.launch {
+            settings.setLineSpacing(spacing)
+            _uiState.update { it.copy(lineSpacing = spacing) }
+            reloadCurrentChapterAppearance()
+        }
+    }
+
+    fun setReadingTheme(theme: String) {
+        viewModelScope.launch {
+            settings.setReadingTheme(theme)
+            _uiState.update { it.copy(readingTheme = theme) }
+            reloadCurrentChapterAppearance()
+        }
+    }
+
+    fun setFontFamily(family: String) {
+        viewModelScope.launch {
+            settings.setFontFamily(family)
+            _uiState.update { it.copy(fontFamily = family) }
+            reloadCurrentChapterAppearance()
+        }
+    }
+
+    private fun reloadCurrentChapterAppearance() {
+        val state = _uiState.value
+        if (state.chapterHtml.isNotBlank()) {
+            loadChapterHtml(state.currentChapter)
+        }
+    }
 
     override fun onCleared() {
         super.onCleared()
+        selectionResolveJob?.cancel()
         evaluateJavascript = null
         parser.close()
+    }
+
+    private companion object {
+        val WHITESPACE = Regex("\\s+")
+        const val MIN_READABLE_CHAPTER_CHARS = 1_000
     }
 }

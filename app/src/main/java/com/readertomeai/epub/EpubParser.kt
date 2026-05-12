@@ -6,6 +6,7 @@ import com.readertomeai.data.model.ChapterContent
 import com.readertomeai.data.model.TocEntry
 import nl.siegmann.epublib.domain.Book as EpubBook
 import nl.siegmann.epublib.domain.Resource
+import nl.siegmann.epublib.domain.TOCReference
 import nl.siegmann.epublib.epub.EpubReader
 import org.jsoup.Jsoup
 import org.jsoup.safety.Safelist
@@ -99,7 +100,9 @@ class EpubParser(private val context: Context) {
             // Sanitize: remove script/iframe/form tags from book content
             val cleanBody = Jsoup.clean(doc.body()?.html() ?: rawHtml, epubSafelist)
 
-            val title = doc.select("h1, h2, h3").firstOrNull()?.text()
+            val headingTitle = doc.select("h1, h2, h3").firstOrNull()?.text()?.trim()
+            val title = getTocTitleForChapter(book, chapterIndex)
+                ?: headingTitle?.takeIf { it.isNotBlank() }
                 ?: "Chapter ${chapterIndex + 1}"
 
             // Inline images as base64 data URIs so they render without file access
@@ -137,6 +140,9 @@ class EpubParser(private val context: Context) {
                         val mimeType = resource.mediaType?.name ?: "image/png"
                         val base64 = Base64.encodeToString(resource.data, Base64.NO_WRAP)
                         img.attr("src", "data:$mimeType;base64,$base64")
+                    } else {
+                        img.attr("alt", img.attr("alt").ifBlank { "[Image]" })
+                        img.removeAttr("src")
                     }
                 } catch (e: Exception) {
                     // If we can't resolve, remove the broken image
@@ -169,19 +175,29 @@ class EpubParser(private val context: Context) {
      * to prevent privacy leaks from book content loading external resources.
      */
     private fun stripRemoteResources(doc: org.jsoup.nodes.Document) {
-        // Strip remote images
-        doc.select("img[src~=^https?://]").forEach { it.remove() }
-        // Strip remote stylesheets
-        doc.select("link[href~=^https?://]").forEach { it.remove() }
-        // Strip remote audio/video
-        doc.select("audio[src~=^https?://], video[src~=^https?://], source[src~=^https?://]").forEach { it.remove() }
-        // Strip any element with background-image pointing to remote URL
-        doc.select("[style*=url]").forEach { el ->
-            val style = el.attr("style")
-            if (style.contains("http://") || style.contains("https://")) {
-                el.removeAttr("style")
+        doc.select("[src], [href], [poster]").forEach { el ->
+            listOf("src", "href", "poster").forEach { attr ->
+                if (isRemoteReference(el.attr(attr))) {
+                    el.removeAttr(attr)
+                }
             }
         }
+        doc.select("[srcset]").forEach { el ->
+            if (el.attr("srcset").split(",").any { isRemoteReference(it.trim().substringBefore(" ")) }) {
+                el.removeAttr("srcset")
+            }
+        }
+        doc.select("[style]").forEach { el ->
+            if (REMOTE_STYLE_URL.containsMatchIn(el.attr("style"))) el.removeAttr("style")
+        }
+    }
+
+    private fun isRemoteReference(value: String): Boolean =
+        REMOTE_REFERENCE.matches(value.trim())
+
+    private companion object {
+        val REMOTE_REFERENCE = Regex("""(?i)(https?:)?//.*""")
+        val REMOTE_STYLE_URL = Regex("""(?i)url\(\s*['"]?\s*(https?:)?//""")
     }
 
     fun getChapterHtmlForWebView(
@@ -244,7 +260,8 @@ class EpubParser(private val context: Context) {
                     }
                 });
 
-                function highlightSentence(startIdx, endIdx) {
+                function highlightSentence(startIdx, endIdx, shouldScroll) {
+                    if (shouldScroll === undefined) shouldScroll = true;
                     clearTtsHighlights();
                     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
                     var currentOffset = 0;
@@ -261,7 +278,7 @@ class EpubParser(private val context: Context) {
                             var span = document.createElement('span');
                             span.className = 'tts-highlight';
                             try { range.surroundContents(span); } catch(e) {}
-                            if (currentOffset <= startIdx) {
+                            if (shouldScroll && currentOffset <= startIdx) {
                                 span.scrollIntoView({ behavior: 'smooth', block: 'center' });
                             }
                         }
@@ -282,10 +299,45 @@ class EpubParser(private val context: Context) {
                     window.scrollTo(0, docHeight * progress);
                 }
 
+                function scrollToTextOffset(offset) {
+                    var textLength = Math.max(document.body.textContent.length, 1);
+                    var docHeight = document.documentElement.scrollHeight - window.innerHeight;
+                    var progress = Math.max(0, Math.min(1, offset / textLength));
+                    window.scrollTo({ top: docHeight * progress, behavior: 'smooth' });
+                }
+
+                function getTextOffset(container, offset) {
+                    try {
+                        var range = document.createRange();
+                        range.setStart(document.body, 0);
+                        range.setEnd(container, offset);
+                        return range.toString().length;
+                    } catch(e) {}
+
+                    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                    var currentOffset = 0;
+                    var node;
+                    while (node = walker.nextNode()) {
+                        if (node === container) {
+                            return currentOffset + offset;
+                        }
+                        currentOffset += node.textContent.length;
+                    }
+                    return currentOffset;
+                }
+
                 document.addEventListener('selectionchange', function() {
                     var selection = window.getSelection();
-                    if (selection && selection.toString().trim().length > 0) {
-                        if (typeof Android !== 'undefined') Android.onTextSelected(selection.toString());
+                    if (selection && selection.rangeCount > 0 && selection.toString().trim().length > 0) {
+                        var range = selection.getRangeAt(0);
+                        var startOffset = getTextOffset(range.startContainer, range.startOffset);
+                        var endOffset = getTextOffset(range.endContainer, range.endOffset);
+                        if (startOffset > endOffset) {
+                            var temp = startOffset;
+                            startOffset = endOffset;
+                            endOffset = temp;
+                        }
+                        if (typeof Android !== 'undefined') Android.onTextSelected(selection.toString(), startOffset, endOffset);
                     }
                 });
             </script>
@@ -297,18 +349,85 @@ class EpubParser(private val context: Context) {
 
     fun getTableOfContents(): List<TocEntry> {
         val book = currentBook ?: return emptyList()
+        val bookToc = buildTocFromReferences(book, book.tableOfContents.tocReferences)
+        if (bookToc.isNotEmpty()) return bookToc
+
         val toc = mutableListOf<TocEntry>()
         val spineRefs = book.spine.spineReferences
 
         spineRefs.forEachIndexed { index, ref ->
             val resource = ref.resource
-            val title = try {
-                val doc = Jsoup.parse(String(resource.data, Charsets.UTF_8))
-                doc.select("h1, h2, h3").firstOrNull()?.text() ?: "Chapter ${index + 1}"
-            } catch (e: Exception) { "Chapter ${index + 1}" }
+            val title = readResourceTitle(resource, index)
             toc.add(TocEntry(title = title, href = resource.href, chapterIndex = index))
         }
         return toc
+    }
+
+    private fun buildTocFromReferences(
+        book: EpubBook,
+        references: List<TOCReference>,
+        level: Int = 0
+    ): List<TocEntry> {
+        val entries = mutableListOf<TocEntry>()
+
+        references.forEach { reference ->
+            val resource = reference.resource
+            val chapterIndex = findSpineIndexForResource(book, resource)
+            val title = reference.title?.trim().orEmpty()
+
+            if (chapterIndex >= 0 && title.isNotBlank()) {
+                entries.add(
+                    TocEntry(
+                        title = title,
+                        href = reference.completeHref ?: resource.href.orEmpty(),
+                        chapterIndex = chapterIndex,
+                        level = level
+                    )
+                )
+            }
+
+            if (reference.children.isNotEmpty()) {
+                entries.addAll(buildTocFromReferences(book, reference.children, level + 1))
+            }
+        }
+
+        return entries.distinctBy { "${it.chapterIndex}|${it.href}|${it.title}" }
+    }
+
+    private fun getTocTitleForChapter(book: EpubBook, chapterIndex: Int): String? =
+        buildTocFromReferences(book, book.tableOfContents.tocReferences)
+            .firstOrNull { it.chapterIndex == chapterIndex }
+            ?.title
+
+    private fun findSpineIndexForResource(book: EpubBook, resource: Resource?): Int {
+        if (resource == null) return -1
+
+        val directIndex = book.spine.getResourceIndex(resource)
+        if (directIndex >= 0) return directIndex
+
+        val href = normalizeHref(resource.href)
+        if (href.isBlank()) return -1
+
+        return book.spine.spineReferences.indexOfFirst { ref ->
+            normalizeHref(ref.resource.href) == href
+        }
+    }
+
+    private fun normalizeHref(href: String?): String =
+        href.orEmpty()
+            .substringBefore("#")
+            .replace('\\', '/')
+            .trimStart('/')
+
+    private fun readResourceTitle(resource: Resource, index: Int): String {
+        return try {
+            val doc = Jsoup.parse(String(resource.data, Charsets.UTF_8))
+            doc.select("h1, h2, h3").firstOrNull()?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: resource.title?.trim()?.takeIf { it.isNotBlank() }
+                ?: "Chapter ${index + 1}"
+        } catch (e: Exception) {
+            resource.title?.trim()?.takeIf { it.isNotBlank() } ?: "Chapter ${index + 1}"
+        }
     }
 
     fun getPlainTextForChapter(chapterIndex: Int): String {

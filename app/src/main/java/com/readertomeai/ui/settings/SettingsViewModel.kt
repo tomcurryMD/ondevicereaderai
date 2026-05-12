@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.readertomeai.ReaderToMeApp
 import com.readertomeai.data.model.AvailableVoices
+import com.readertomeai.data.repository.SettingsRepository
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -13,10 +14,10 @@ class SettingsViewModel : ViewModel() {
     private val ttsEngine = ReaderToMeApp.instance.ttsEngine
 
     val ttsSpeed = settings.ttsSpeed
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 1.0f)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_TTS_SPEED)
 
     val readingTheme = settings.readingTheme
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "system")
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), SettingsRepository.DEFAULT_READING_THEME)
 
     val autoScrollDuringTts = settings.autoScrollDuringTts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
@@ -43,5 +44,9 @@ class SettingsViewModel : ViewModel() {
 
     fun setHighlightDuringTts(enabled: Boolean) {
         viewModelScope.launch { settings.setHighlightDuringTts(enabled) }
+    }
+
+    fun setReadingTheme(theme: String) {
+        viewModelScope.launch { settings.setReadingTheme(theme) }
     }
 }

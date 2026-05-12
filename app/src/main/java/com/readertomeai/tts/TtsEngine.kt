@@ -12,6 +12,7 @@ import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import com.readertomeai.data.model.AvailableVoices
 import com.readertomeai.data.model.VoiceModel
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
@@ -19,6 +20,8 @@ import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
 import java.io.*
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 enum class TtsState {
     IDLE, LOADING, SPEAKING, PAUSED
@@ -31,12 +34,46 @@ data class TtsSpeakingProgress(
     val currentSentenceEnd: Int = 0
 )
 
+private data class TtsUtterance(
+    val index: Int,
+    val text: String,
+    val startChar: Int,
+    val endChar: Int,
+    val endsSentence: Boolean,
+    val pauseAfterMs: Long
+)
+
+private data class TtsTextSegment(
+    val text: String,
+    val endsSentence: Boolean,
+    val pauseAfterMs: Long = 0L
+)
+
+private data class GeneratedTtsAudio(
+    val utterance: TtsUtterance,
+    val samples: FloatArray,
+    val sampleRate: Int
+)
+
+private const val DEFAULT_TTS_SPEED = 0.78f
+private const val TTS_AHEAD_BUFFER_SIZE = 24
+private const val INITIAL_TTS_PREFETCH_ITEMS = 2
+private const val TTS_SENTENCE_PAUSE_MS = 240L
+private const val TTS_PHRASE_PAUSE_MS = 45L
+private const val MIN_TTS_FRAGMENT_WORDS = 8
+private const val TARGET_TTS_FRAGMENT_WORDS = 14
+private const val MAX_TTS_FRAGMENT_WORDS = 18
+private const val MAX_TTS_CHUNK_WORDS = MAX_TTS_FRAGMENT_WORDS
+
 class TtsEngine(private val context: Context) {
 
     private var tts: OfflineTts? = null
     private var audioTrack: AudioTrack? = null
     private var speakJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val generatorDispatcher = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "TtsGenerator").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
 
     private val _state = MutableStateFlow(TtsState.IDLE)
     val state: StateFlow<TtsState> = _state
@@ -50,7 +87,7 @@ class TtsEngine(private val context: Context) {
     private val _downloadProgress = MutableStateFlow<Float?>(null)
     val downloadProgress: StateFlow<Float?> = _downloadProgress
 
-    var speed: Float = 1.0f
+    var speed: Float = DEFAULT_TTS_SPEED
 
     @Volatile
     private var isPaused = false
@@ -165,6 +202,20 @@ class TtsEngine(private val context: Context) {
         }
     }
 
+    suspend fun downloadAndInitializeVoice(voice: VoiceModel): Boolean {
+        _state.value = TtsState.LOADING
+        val downloaded = downloadVoice(voice)
+        if (!downloaded) {
+            _state.value = TtsState.IDLE
+            return false
+        }
+        return initializeVoice(voice.id).also { initialized ->
+            if (!initialized) {
+                _state.value = TtsState.IDLE
+            }
+        }
+    }
+
     private fun downloadAndExtractTarBz2(
         urlString: String,
         destDir: File,
@@ -267,7 +318,7 @@ class TtsEngine(private val context: Context) {
             )
 
             tts?.release()
-            tts = OfflineTts(context.assets, config)
+            tts = OfflineTts(null, config)
             _currentVoice.value = voice
             _state.value = TtsState.IDLE
             true
@@ -287,8 +338,8 @@ class TtsEngine(private val context: Context) {
     ) {
         stop()
 
-        val sentences = splitIntoSentences(text)
-        if (sentences.isEmpty()) return
+        val segments = splitIntoTtsSegments(text)
+        if (segments.isEmpty()) return
 
         // Request audio focus
         val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
@@ -299,54 +350,129 @@ class TtsEngine(private val context: Context) {
         _state.value = TtsState.SPEAKING
 
         speakJob = scope.launch {
-            try {
-                var charOffset = 0
-                for ((index, sentence) in sentences.withIndex()) {
-                    if (isCancelled || !isActive) break
+            val generationFailed = AtomicBoolean(false)
+            var generatorJob: Job? = null
+            val audioChannel = Channel<GeneratedTtsAudio>(capacity = TTS_AHEAD_BUFFER_SIZE)
 
-                    // Wait while paused
+            try {
+                val currentTts = tts ?: return@launch
+                val playbackSpeed = speed
+                val utterances = buildUtterances(text, segments)
+
+                generatorJob = launch(generatorDispatcher) {
+                    try {
+                        for (utterance in utterances) {
+                            if (isCancelled || !isActive) break
+
+                            val audio = currentTts.generate(
+                                text = utterance.text,
+                                sid = 0,
+                                speed = playbackSpeed
+                            )
+
+                            if (isCancelled || !isActive) break
+
+                            audioChannel.send(
+                                GeneratedTtsAudio(
+                                    utterance = utterance,
+                                    samples = audio.samples,
+                                    sampleRate = audio.sampleRate
+                                )
+                            )
+                        }
+                    } catch (e: Exception) {
+                        generationFailed.set(true)
+                        e.printStackTrace()
+                    } finally {
+                        audioChannel.close()
+                    }
+                }
+
+                val prefetchedAudio = ArrayDeque<GeneratedTtsAudio>()
+                repeat(INITIAL_TTS_PREFETCH_ITEMS) {
+                    val audio = audioChannel.receiveCatching().getOrNull() ?: return@repeat
+                    prefetchedAudio.addLast(audio)
+                }
+
+                while (!isCancelled && isActive) {
+                    val audio = if (prefetchedAudio.isNotEmpty()) {
+                        prefetchedAudio.removeFirst()
+                    } else {
+                        audioChannel.receiveCatching().getOrNull() ?: break
+                    }
+
                     while (isPaused && !isCancelled && isActive) {
                         delay(100)
                     }
                     if (isCancelled || !isActive) break
 
-                    val sentenceStart = text.indexOf(sentence, charOffset)
-                    val sentenceEnd = sentenceStart + sentence.length
-
                     _progress.value = TtsSpeakingProgress(
-                        sentenceIndex = index,
-                        totalSentences = sentences.size,
-                        currentSentenceStart = sentenceStart,
-                        currentSentenceEnd = sentenceEnd
+                        sentenceIndex = audio.utterance.index,
+                        totalSentences = utterances.size,
+                        currentSentenceStart = audio.utterance.startChar,
+                        currentSentenceEnd = audio.utterance.endChar
                     )
 
                     withContext(Dispatchers.Main) {
-                        onSentenceStart?.invoke(index, sentenceStart, sentenceEnd)
+                        onSentenceStart?.invoke(
+                            audio.utterance.index,
+                            audio.utterance.startChar,
+                            audio.utterance.endChar
+                        )
                     }
-
-                    // Generate audio for this sentence
-                    val currentTts = tts ?: break
-                    val audio = currentTts.generate(
-                        text = sentence,
-                        sid = 0,
-                        speed = speed
-                    )
 
                     if (isCancelled || !isActive) break
 
-                    // Play audio and wait for completion
                     playAudioBlocking(audio.samples, audio.sampleRate)
-
-                    charOffset = sentenceEnd
+                    if (audio.utterance.pauseAfterMs > 0 && audio.utterance.index < utterances.lastIndex) {
+                        waitForPause(audio.utterance.pauseAfterMs)
+                    }
                 }
             } finally {
+                generatorJob?.cancel()
+                audioChannel.close()
                 audioManager.abandonAudioFocusRequest(audioFocusRequest)
                 withContext(Dispatchers.Main) {
-                    if (!isCancelled) {
+                    if (!isCancelled && !generationFailed.get()) {
                         _state.value = TtsState.IDLE
                         onComplete?.invoke()
                     }
                 }
+            }
+        }
+    }
+
+    private fun buildUtterances(text: String, segments: List<TtsTextSegment>): List<TtsUtterance> {
+        var charOffset = 0
+        val utterances = mutableListOf<TtsUtterance>()
+
+        for ((index, segment) in segments.withIndex()) {
+            val foundStart = text.indexOf(segment.text, charOffset)
+            val start = if (foundStart >= 0) foundStart else charOffset.coerceAtMost(text.length)
+            val end = (start + segment.text.length).coerceAtMost(text.length)
+            charOffset = end
+            utterances.add(
+                TtsUtterance(
+                    index = index,
+                    text = segment.text,
+                    startChar = start,
+                    endChar = end,
+                    endsSentence = segment.endsSentence,
+                    pauseAfterMs = segment.pauseAfterMs
+                )
+            )
+        }
+        return utterances
+    }
+
+    private suspend fun waitForPause(pauseMs: Long) {
+        var elapsedMs = 0L
+        while (!isCancelled && elapsedMs < pauseMs) {
+            if (isPaused) {
+                delay(100)
+            } else {
+                delay(20)
+                elapsedMs += 20
             }
         }
     }
@@ -403,7 +529,7 @@ class TtsEngine(private val context: Context) {
                             track.play()
                         }
                     }
-                    delay(50)
+                    delay(20)
                 }
 
                 track.stop()
@@ -421,13 +547,17 @@ class TtsEngine(private val context: Context) {
     fun pause() {
         isPaused = true
         _state.value = TtsState.PAUSED
-        // AudioTrack pause is handled in playAudioBlocking loop
+        try {
+            audioTrack?.pause()
+        } catch (_: Exception) {}
     }
 
     fun resume() {
         isPaused = false
         _state.value = TtsState.SPEAKING
-        // AudioTrack resume is handled in playAudioBlocking loop
+        try {
+            audioTrack?.play()
+        } catch (_: Exception) {}
     }
 
     fun stop() {
@@ -452,38 +582,141 @@ class TtsEngine(private val context: Context) {
         stop()
         tts?.release()
         tts = null
+        generatorDispatcher.close()
         scope.cancel()
     }
 
     // ── Sentence splitting ──────────────────────────────────────────
 
-    private fun splitIntoSentences(text: String): List<String> {
+    private fun splitIntoTtsSegments(text: String): List<TtsTextSegment> {
         if (text.isBlank()) return emptyList()
 
-        val sentences = mutableListOf<String>()
+        val segments = mutableListOf<TtsTextSegment>()
+        val sentencePattern = Regex("""[^.!?]+(?:[.!?]+["')\]]*)?""")
+        val sentences = sentencePattern
+            .findAll(text)
+            .map { it.value.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        val parts = sentences.ifEmpty { listOf(text.trim()) }
+
+        for (part in parts) {
+            addSentenceFragments(part, segments)
+        }
+        return segments
+    }
+
+    private fun addSentenceFragments(sentence: String, out: MutableList<TtsTextSegment>) {
+        val phraseParts = sentence
+            .split(Regex("""(?<=[,;:])\s+"""))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+        val mergedPhrases = mutableListOf<String>()
+        var pending = ""
+        for (part in phraseParts) {
+            pending = if (pending.isEmpty()) part else "$pending $part"
+            if (wordCount(pending) >= MIN_TTS_FRAGMENT_WORDS) {
+                mergedPhrases.add(pending)
+                pending = ""
+            }
+        }
+        if (pending.isNotEmpty()) {
+            if (mergedPhrases.isNotEmpty() && wordCount(pending) < MIN_TTS_FRAGMENT_WORDS) {
+                val previous = mergedPhrases.removeAt(mergedPhrases.lastIndex)
+                mergedPhrases.add("$previous $pending")
+            } else {
+                mergedPhrases.add(pending)
+            }
+        }
+
+        for ((index, phrase) in mergedPhrases.withIndex()) {
+            val endsSentence = index == mergedPhrases.lastIndex
+            addTtsFragment(phrase, endsSentence, out)
+        }
+    }
+
+    private fun addTtsFragment(
+        fragment: String,
+        endsSentence: Boolean,
+        out: MutableList<TtsTextSegment>
+    ) {
+        val words = wordsIn(fragment)
+        if (words.isEmpty()) return
+        val pauseAfterMs = if (endsSentence) TTS_SENTENCE_PAUSE_MS else TTS_PHRASE_PAUSE_MS
+
+        if (words.size <= MAX_TTS_FRAGMENT_WORDS) {
+            out.add(TtsTextSegment(fragment, endsSentence = endsSentence, pauseAfterMs = pauseAfterMs))
+            return
+        }
+
+        var wordIndex = 0
+        while (wordIndex < words.size) {
+            val remaining = words.size - wordIndex
+            val take = when {
+                remaining <= MAX_TTS_FRAGMENT_WORDS -> remaining
+                remaining <= MAX_TTS_FRAGMENT_WORDS + MIN_TTS_FRAGMENT_WORDS -> (remaining + 1) / 2
+                else -> TARGET_TTS_FRAGMENT_WORDS
+            }
+            val nextIndex = (wordIndex + take).coerceAtMost(words.size)
+            val isLastGroup = nextIndex == words.size
+            out.add(
+                TtsTextSegment(
+                    text = words.subList(wordIndex, nextIndex).joinToString(" "),
+                    endsSentence = endsSentence && isLastGroup,
+                    pauseAfterMs = if (isLastGroup) pauseAfterMs else TTS_PHRASE_PAUSE_MS
+                )
+            )
+            wordIndex = nextIndex
+        }
+    }
+
+    private fun wordCount(text: String): Int = wordsIn(text).size
+
+    private fun wordsIn(text: String): List<String> =
+        text.split(Regex("""\s+""")).filter { it.isNotBlank() }
+
+    private fun splitIntoLegacyTtsSegments(text: String): List<TtsTextSegment> {
+        if (text.isBlank()) return emptyList()
+
+        val segments = mutableListOf<TtsTextSegment>()
         val pattern = Regex("""(?<=[.!?])\s+(?=[A-Z"'“”])""")
         val parts = pattern.split(text)
 
         for (part in parts) {
             val trimmed = part.trim()
             if (trimmed.isNotEmpty()) {
-                if (trimmed.length > 200) {
-                    val subParts = trimmed.split(Regex("""(?<=[,;:])\s+"""))
-                    val buffer = StringBuilder()
-                    for (sub in subParts) {
-                        if (buffer.length + sub.length > 200 && buffer.isNotEmpty()) {
-                            sentences.add(buffer.toString().trim())
-                            buffer.clear()
-                        }
-                        if (buffer.isNotEmpty()) buffer.append(" ")
-                        buffer.append(sub)
-                    }
-                    if (buffer.isNotEmpty()) sentences.add(buffer.toString().trim())
-                } else {
-                    sentences.add(trimmed)
-                }
+                addLegacyTtsWordGroups(trimmed, segments)
             }
         }
-        return sentences
+        return segments
     }
+
+    private fun addLegacyTtsWordGroups(sentence: String, out: MutableList<TtsTextSegment>) {
+        val words = sentence.split(Regex("""\s+""")).filter { it.isNotBlank() }
+        if (words.isEmpty()) return
+        if (words.size <= MAX_TTS_CHUNK_WORDS) {
+            out.add(TtsTextSegment(sentence, endsSentence = true))
+            return
+        }
+
+        var wordIndex = 0
+        while (wordIndex < words.size) {
+            val remaining = words.size - wordIndex
+            val take = when {
+                remaining <= MAX_TTS_CHUNK_WORDS -> remaining
+                remaining <= MAX_TTS_CHUNK_WORDS * 2 -> (remaining + 1) / 2
+                else -> MAX_TTS_CHUNK_WORDS
+            }
+            val nextIndex = (wordIndex + take).coerceAtMost(words.size)
+            out.add(
+                TtsTextSegment(
+                    text = words.subList(wordIndex, nextIndex).joinToString(" "),
+                    endsSentence = nextIndex == words.size
+                )
+            )
+            wordIndex = nextIndex
+        }
+    }
+
 }

@@ -95,7 +95,7 @@ fun VoiceManagerScreen(
             items(voices) { voice ->
                 VoiceCard(
                     voice = voice,
-                    isSelected = voice.id == selectedVoiceId,
+                    isSelected = voice.id == selectedVoiceId && voice.isDownloaded,
                     isDownloading = voice.id == downloadingVoiceId,
                     downloadProgress = if (voice.id == downloadingVoiceId) downloadProgress else null,
                     onDownload = { viewModel.downloadVoice(voice) },

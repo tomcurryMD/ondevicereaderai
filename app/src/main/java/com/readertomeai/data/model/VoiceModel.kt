@@ -42,7 +42,8 @@ private const val ESPEAK_NG_DATA_URL =
  */
 object AvailableVoices {
 
-    const val DEFAULT_VOICE_ID = "vits-piper-en_US-amy-medium"
+    const val DEFAULT_VOICE_ID = "vits-piper-en_US-lessac-medium"
+    const val COMPACT_FALLBACK_VOICE_ID = "vits-piper-en_US-ryan-high-int8"
 
     private const val BASE =
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en"
@@ -56,6 +57,26 @@ object AvailableVoices {
 
     val voices = listOf(
         VoiceModel(
+            id = "vits-piper-en_US-ryan-high-int8",
+            name = "Ryan High Compact (US)",
+            language = "en-US",
+            quality = VoiceQuality.HIGH,
+            sampleRate = 22050,
+            modelUrl = "$SHERPA_BASE/vits-piper-en_US-ryan-high-int8.tar.bz2",
+            tokensUrl = "",
+            sizeInMb = 33
+        ),
+        VoiceModel(
+            id = "vits-piper-en_US-ryan-medium",
+            name = "Ryan (US)",
+            language = "en-US",
+            quality = VoiceQuality.MEDIUM,
+            sampleRate = 22050,
+            modelUrl = "$SHERPA_BASE/vits-piper-en_US-ryan-medium.tar.bz2",
+            tokensUrl = "",
+            sizeInMb = 64
+        ),
+        VoiceModel(
             id = "vits-piper-en_US-amy-medium",
             name = "Amy (US)",
             language = "en-US",
@@ -63,7 +84,7 @@ object AvailableVoices {
             sampleRate = 22050,
             modelUrl = "$SHERPA_BASE/vits-piper-en_US-amy-medium.tar.bz2",
             tokensUrl = "", // tokens.txt is inside the tar archive
-            sizeInMb = 63
+            sizeInMb = 64
         ),
         VoiceModel(
             id = "vits-piper-en_US-lessac-medium",
@@ -73,7 +94,7 @@ object AvailableVoices {
             sampleRate = 22050,
             modelUrl = "$SHERPA_BASE/vits-piper-en_US-lessac-medium.tar.bz2",
             tokensUrl = "",
-            sizeInMb = 63
+            sizeInMb = 64
         ),
         VoiceModel(
             id = "vits-piper-en_US-libritts_r-medium",
@@ -83,7 +104,7 @@ object AvailableVoices {
             sampleRate = 22050,
             modelUrl = "$SHERPA_BASE/vits-piper-en_US-libritts_r-medium.tar.bz2",
             tokensUrl = "",
-            sizeInMb = 75
+            sizeInMb = 78
         ),
         VoiceModel(
             id = "vits-piper-en_GB-alba-medium",
@@ -93,7 +114,7 @@ object AvailableVoices {
             sampleRate = 22050,
             modelUrl = "$SHERPA_BASE/vits-piper-en_GB-alba-medium.tar.bz2",
             tokensUrl = "",
-            sizeInMb = 63
+            sizeInMb = 64
         ),
         VoiceModel(
             id = "vits-piper-en_US-amy-low",
@@ -103,7 +124,7 @@ object AvailableVoices {
             sampleRate = 16000,
             modelUrl = "$SHERPA_BASE/vits-piper-en_US-amy-low.tar.bz2",
             tokensUrl = "",
-            sizeInMb = 16
+            sizeInMb = 64
         )
     )
 }

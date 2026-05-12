@@ -7,6 +7,9 @@
 /captures
 .externalNativeBuild
 .cxx
+.android/
+.android-home/
+.kotlin/
 local.properties
 /app/build
 

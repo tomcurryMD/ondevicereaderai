@@ -60,7 +60,7 @@ The TTS pipeline has never been tested on a real device. This is the single bigg
 
 - Install the debug APK: `adb install app/build/outputs/apk/debug/app-arm64-v8a-debug.apk`
 - Open the app, import an ePub file
-- Go to Settings → Voice Models → Download "Amy Low (US)" (16 MB, fastest to test)
+- Go to Settings → Voice Models → Download "Amy Low (US)" (~64 MB voice + ~7 MB shared espeak data on first voice download)
 - Select the voice, go back to the reader
 - Press Play — verify audio plays, sentence highlights, auto-scrolls
 - Press Pause — verify audio pauses, notification shows "Resume"

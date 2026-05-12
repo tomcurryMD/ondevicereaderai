@@ -66,8 +66,8 @@ fun SettingsScreen(
                     icon = Icons.Outlined.Speed,
                     title = "Speech Speed",
                     value = ttsSpeed,
-                    valueRange = 0.5f..2.0f,
-                    valueLabel = "${"%.1f".format(ttsSpeed)}x",
+                    valueRange = 0.5f..1.5f,
+                    valueLabel = "${"%.2f".format(ttsSpeed)}x",
                     onValueChange = { viewModel.setTtsSpeed(it) }
                 )
 
@@ -94,8 +94,17 @@ fun SettingsScreen(
                     icon = Icons.Outlined.Palette,
                     title = "Default Theme",
                     subtitle = readingTheme.replaceFirstChar { it.uppercase() },
-                    onClick = { /* Opens theme picker */ }
+                    onClick = { }
                 )
+                Row(
+                    modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    SettingsThemeChip("Light", "light", readingTheme == "light", viewModel::setReadingTheme)
+                    SettingsThemeChip("Dark", "dark", readingTheme == "dark", viewModel::setReadingTheme)
+                    SettingsThemeChip("Sepia", "sepia", readingTheme == "sepia", viewModel::setReadingTheme)
+                    SettingsThemeChip("Auto", "system", readingTheme == "system", viewModel::setReadingTheme)
+                }
             }
 
             // About section
@@ -138,6 +147,24 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
+}
+
+@Composable
+fun SettingsThemeChip(
+    label: String,
+    value: String,
+    selected: Boolean,
+    onSelect: (String) -> Unit
+) {
+    FilterChip(
+        selected = selected,
+        onClick = { onSelect(value) },
+        label = { Text(label) },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = Purple,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+        )
+    )
 }
 
 @Composable
