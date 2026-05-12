@@ -19,6 +19,7 @@ import android.net.Uri
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.readertomeai.data.model.ReaderMode
 import com.readertomeai.BuildConfig
 import com.readertomeai.ui.theme.Purple
 
@@ -32,6 +33,8 @@ fun SettingsScreen(
     val ttsSpeed by viewModel.ttsSpeed.collectAsState()
     val readingTheme by viewModel.readingTheme.collectAsState()
     val selectedVoiceName by viewModel.selectedVoiceName.collectAsState()
+    val selectedHumanVoiceName by viewModel.selectedHumanVoiceName.collectAsState()
+    val readerMode by viewModel.readerMode.collectAsState()
     val autoScroll by viewModel.autoScrollDuringTts.collectAsState()
     val highlightTts by viewModel.highlightDuringTts.collectAsState()
 
@@ -53,11 +56,29 @@ fun SettingsScreen(
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
         ) {
+            SettingsSection("Reader Mode") {
+                Row(
+                    modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ReaderModeChip(
+                        label = "Instant Reader",
+                        selected = readerMode == ReaderMode.INSTANT,
+                        onClick = { viewModel.setReaderMode(ReaderMode.INSTANT) }
+                    )
+                    ReaderModeChip(
+                        label = "Human Reader",
+                        selected = readerMode == ReaderMode.HUMAN,
+                        onClick = { viewModel.setReaderMode(ReaderMode.HUMAN) }
+                    )
+                }
+            }
+
             // Voice section
-            SettingsSection("Voice") {
+            SettingsSection("Instant Reader") {
                 SettingsItem(
                     icon = Icons.Outlined.RecordVoiceOver,
-                    title = "Voice Model",
+                    title = "Instant Reader Voice",
                     subtitle = selectedVoiceName,
                     onClick = onVoiceManager
                 )
@@ -86,6 +107,23 @@ fun SettingsScreen(
                     checked = autoScroll,
                     onCheckedChange = { viewModel.setAutoScrollDuringTts(it) }
                 )
+            }
+
+            SettingsSection("Human Reader") {
+                SettingsItem(
+                    icon = Icons.Outlined.GraphicEq,
+                    title = "Human Reader Model",
+                    subtitle = "$selectedHumanVoiceName. Prepares chapters before playback.",
+                    onClick = onVoiceManager
+                )
+                Column(modifier = Modifier.padding(start = 56.dp, end = 16.dp, bottom = 12.dp)) {
+                    Text(
+                        "Highest-quality local reading mode. It downloads a larger Kokoro model once, prepares chapter audio on-device, then plays the prepared chapter smoothly.",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                }
             }
 
             // Reading section
@@ -147,6 +185,23 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
+}
+
+@Composable
+fun ReaderModeChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label) },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = Purple,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+        )
+    )
 }
 
 @Composable

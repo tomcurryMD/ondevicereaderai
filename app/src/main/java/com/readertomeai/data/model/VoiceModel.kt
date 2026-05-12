@@ -5,6 +5,7 @@ data class VoiceModel(
     val name: String,
     val language: String,
     val quality: VoiceQuality,
+    val engine: VoiceEngine = VoiceEngine.PIPER_VITS,
     val sampleRate: Int = 22050,
     /** URL to the .onnx model file */
     val modelUrl: String,
@@ -16,11 +17,28 @@ data class VoiceModel(
     val isDownloaded: Boolean = false,
     val localModelPath: String? = null,
     val localTokensPath: String? = null,
-    val localDataDir: String? = null
+    val localDataDir: String? = null,
+    val localVoicesPath: String? = null,
+    val localLexiconPath: String? = null,
+    val speakerId: Int = 0
 )
 
 enum class VoiceQuality {
     LOW, MEDIUM, HIGH
+}
+
+enum class VoiceEngine {
+    PIPER_VITS, KOKORO
+}
+
+enum class ReaderMode(val id: String) {
+    INSTANT("instant"),
+    HUMAN("human");
+
+    companion object {
+        fun fromId(id: String?): ReaderMode =
+            entries.firstOrNull { it.id == id } ?: INSTANT
+    }
 }
 
 /** Shared espeak-ng-data archive used by all Piper VITS voices via sherpa-onnx */
@@ -44,6 +62,7 @@ object AvailableVoices {
 
     const val DEFAULT_VOICE_ID = "vits-piper-en_US-lessac-medium"
     const val COMPACT_FALLBACK_VOICE_ID = "vits-piper-en_US-ryan-high-int8"
+    const val HUMAN_READER_VOICE_ID = "kokoro-int8-multi-lang-v1_1"
 
     private const val BASE =
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en"
@@ -56,6 +75,18 @@ object AvailableVoices {
         "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models"
 
     val voices = listOf(
+        VoiceModel(
+            id = HUMAN_READER_VOICE_ID,
+            name = "Human Reader (Kokoro)",
+            language = "en-US",
+            quality = VoiceQuality.HIGH,
+            engine = VoiceEngine.KOKORO,
+            sampleRate = 24000,
+            modelUrl = "$SHERPA_BASE/kokoro-int8-multi-lang-v1_1.tar.bz2",
+            tokensUrl = "",
+            sizeInMb = 180,
+            speakerId = 16
+        ),
         VoiceModel(
             id = "vits-piper-en_US-ryan-high-int8",
             name = "Ryan High Compact (US)",

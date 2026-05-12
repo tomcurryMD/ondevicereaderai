@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import com.readertomeai.data.model.AvailableVoices
+import com.readertomeai.data.model.ReaderMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -27,6 +28,12 @@ class SettingsRepository(private val context: Context) {
     val ttsPitch: Flow<Float> = context.dataStore.data.map { it[TTS_PITCH] ?: 1.0f }
     val autoScrollDuringTts: Flow<Boolean> = context.dataStore.data.map { it[AUTO_SCROLL_TTS] ?: true }
     val highlightDuringTts: Flow<Boolean> = context.dataStore.data.map { it[HIGHLIGHT_TTS] ?: true }
+    val readerMode: Flow<ReaderMode> = context.dataStore.data.map {
+        ReaderMode.fromId(it[READER_MODE])
+    }
+    val selectedHumanVoiceId: Flow<String> = context.dataStore.data.map {
+        it[SELECTED_HUMAN_VOICE] ?: AvailableVoices.HUMAN_READER_VOICE_ID
+    }
 
     // Library settings
     val sortOrder: Flow<String> = context.dataStore.data.map { it[SORT_ORDER] ?: "recent" }
@@ -91,6 +98,14 @@ class SettingsRepository(private val context: Context) {
         context.dataStore.edit { it[HIGHLIGHT_TTS] = enabled }
     }
 
+    suspend fun setReaderMode(mode: ReaderMode) {
+        context.dataStore.edit { it[READER_MODE] = mode.id }
+    }
+
+    suspend fun setSelectedHumanVoice(voiceId: String) {
+        context.dataStore.edit { it[SELECTED_HUMAN_VOICE] = voiceId }
+    }
+
     suspend fun setSortOrder(order: String) {
         context.dataStore.edit { it[SORT_ORDER] = order }
     }
@@ -111,6 +126,8 @@ class SettingsRepository(private val context: Context) {
         private val TTS_PITCH = floatPreferencesKey("tts_pitch")
         private val AUTO_SCROLL_TTS = booleanPreferencesKey("auto_scroll_tts")
         private val HIGHLIGHT_TTS = booleanPreferencesKey("highlight_tts")
+        private val READER_MODE = stringPreferencesKey("reader_mode")
+        private val SELECTED_HUMAN_VOICE = stringPreferencesKey("selected_human_voice")
         private val SORT_ORDER = stringPreferencesKey("sort_order")
         private val GRID_VIEW = booleanPreferencesKey("grid_view")
 

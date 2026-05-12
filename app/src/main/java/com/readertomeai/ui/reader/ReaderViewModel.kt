@@ -14,6 +14,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
+
+data class HumanReaderChapterStatus(
+    val label: String,
+    val progress: Float? = null
+)
 
 data class ReaderUiState(
     val book: Book? = null,
@@ -39,7 +45,8 @@ data class ReaderUiState(
     val selectedText: String = "",
     val selectedTextStart: Int = 0,
     val selectedTextEnd: Int = 0,
-    val ttsStatusMessage: String? = null
+    val ttsStatusMessage: String? = null,
+    val humanReaderStatuses: Map<Int, HumanReaderChapterStatus> = emptyMap()
 )
 
 class ReaderViewModel : ViewModel() {
@@ -131,6 +138,8 @@ class ReaderViewModel : ViewModel() {
                 )
             }
 
+            refreshHumanReaderStatuses(book.id, totalChapters)
+
             // Collect bookmarks
             viewModelScope.launch {
                 repo.getBookmarks(bookId).collect { bookmarks ->
@@ -219,6 +228,7 @@ class ReaderViewModel : ViewModel() {
         _uiState.update { it.copy(savedScrollPosition = 0f) }
         loadChapterHtml(index)
         saveProgress(index, 0f)
+        _uiState.value.book?.let { refreshHumanReaderStatuses(it.id, _uiState.value.totalChapters) }
     }
 
     fun nextChapter() = goToChapter(_uiState.value.currentChapter + 1)
@@ -419,6 +429,11 @@ class ReaderViewModel : ViewModel() {
         val book = state.book ?: return
 
         viewModelScope.launch {
+            if (settings.readerMode.first() == ReaderMode.HUMAN) {
+                playHumanReaderTts(state, book)
+                return@launch
+            }
+
             settings.migrateTtsDefaultsIfNeeded()
             ttsEngine.speed = settings.ttsSpeed.first()
             val selectedVoiceId = settings.selectedVoiceId.first()
@@ -476,6 +491,148 @@ class ReaderViewModel : ViewModel() {
                         stopTts()
                     }
                 }
+            )
+        }
+    }
+
+    private suspend fun playHumanReaderTts(state: ReaderUiState, book: Book) {
+        settings.migrateTtsDefaultsIfNeeded()
+        ttsEngine.speed = settings.ttsSpeed.first()
+        val selectedVoiceId = settings.selectedHumanVoiceId.first()
+        val voice = AvailableVoices.voices.find { it.id == selectedVoiceId }
+            ?: AvailableVoices.voices.first { it.id == AvailableVoices.HUMAN_READER_VOICE_ID }
+
+        val humanVoiceReady = withContext(Dispatchers.IO) {
+            val downloaded = ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
+            if (downloaded) {
+                ttsEngine.initializeVoice(voice.id)
+            } else {
+                withContext(Dispatchers.Main) {
+                    _uiState.update {
+                        it.copy(ttsStatusMessage = "Downloading Human Reader model. This is a one-time download.")
+                    }
+                }
+                ttsEngine.downloadAndInitializeVoice(voice)
+            }
+        }
+
+        if (!humanVoiceReady) {
+            _uiState.update { it.copy(ttsStatusMessage = "Could not prepare Human Reader model. Check connection.") }
+            return
+        }
+
+        val text = withContext(Dispatchers.IO) {
+            parser.getPlainTextForChapter(state.currentChapter)
+        }
+        if (text.isBlank()) return
+
+        val chapterForPlayback = state.currentChapter
+        val startOffset = resolveTtsStartOffset(chapterForPlayback, text)
+        val textToRead = text.substring(startOffset)
+        if (textToRead.isBlank()) {
+            resetTtsResume()
+            return
+        }
+
+        val files = humanReaderFiles(book.id, voice.id, chapterForPlayback, startOffset)
+        if (!files.wav.exists() || !files.marks.exists()) {
+            setHumanReaderStatus(chapterForPlayback, "Preparing", 0f)
+            _uiState.update { it.copy(ttsStatusMessage = "Human Reader is preparing this chapter.") }
+            val rendered = ttsEngine.renderCurrentVoiceToWav(
+                text = textToRead,
+                wavFile = files.wav,
+                marksFile = files.marks
+            ) { progress ->
+                setHumanReaderStatus(chapterForPlayback, "Preparing", progress)
+                _uiState.update {
+                    it.copy(ttsStatusMessage = "Human Reader preparing chapter ${(progress * 100).toInt()}%")
+                }
+            }
+
+            if (!rendered) {
+                setHumanReaderStatus(chapterForPlayback, "Failed", null)
+                _uiState.update { it.copy(ttsStatusMessage = "Human Reader could not prepare this chapter.") }
+                return
+            }
+        }
+
+        setHumanReaderStatus(chapterForPlayback, "Ready", null)
+        _uiState.update { it.copy(error = null, ttsStatusMessage = null) }
+
+        val ctx = ReaderToMeApp.instance
+        val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
+            action = TtsPlaybackService.ACTION_START
+            putExtra(TtsPlaybackService.EXTRA_BOOK_TITLE, book.title)
+        }
+        ctx.startForegroundService(intent)
+
+        val shouldHighlight = settings.highlightDuringTts.first()
+        val shouldAutoScroll = settings.autoScrollDuringTts.first()
+        val marks = ttsEngine.readRenderedMarks(files.marks)
+
+        selectedPlaybackStartPending = false
+        ttsEngine.playRenderedChapter(
+            wavFile = files.wav,
+            marks = marks,
+            onSentenceStart = { _, start, end ->
+                val absoluteStart = (startOffset + start).coerceIn(0, text.length)
+                val absoluteEnd = (startOffset + end).coerceIn(absoluteStart, text.length)
+                rememberTtsPosition(chapterForPlayback, absoluteStart, text.length)
+                if (shouldHighlight) {
+                    evaluateJavascript?.invoke("highlightSentence($absoluteStart, $absoluteEnd, $shouldAutoScroll);")
+                } else if (shouldAutoScroll) {
+                    evaluateJavascript?.invoke("scrollToTextOffset($absoluteStart);")
+                }
+            },
+            onComplete = {
+                if (chapterForPlayback < state.totalChapters - 1) {
+                    resetTtsResume()
+                    nextChapter()
+                    playTts()
+                } else {
+                    resetTtsResume()
+                    stopTts()
+                }
+            }
+        )
+    }
+
+    private data class HumanReaderFiles(val wav: File, val marks: File)
+
+    private fun humanReaderFiles(
+        bookId: Long,
+        voiceId: String,
+        chapterIndex: Int,
+        startOffset: Int
+    ): HumanReaderFiles {
+        val safeVoiceId = voiceId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        val dir = File(ReaderToMeApp.instance.filesDir, "human_reader/book_$bookId/$safeVoiceId")
+        val suffix = if (startOffset <= 0) "full" else "from_$startOffset"
+        return HumanReaderFiles(
+            wav = File(dir, "chapter_${chapterIndex}_$suffix.wav"),
+            marks = File(dir, "chapter_${chapterIndex}_$suffix.marks")
+        )
+    }
+
+    private fun refreshHumanReaderStatuses(bookId: Long, totalChapters: Int) {
+        val voiceId = AvailableVoices.HUMAN_READER_VOICE_ID
+        val statuses = (0 until totalChapters).mapNotNull { chapterIndex ->
+            val files = humanReaderFiles(bookId, voiceId, chapterIndex, 0)
+            if (files.wav.exists() && files.marks.exists()) {
+                chapterIndex to HumanReaderChapterStatus("Ready")
+            } else {
+                null
+            }
+        }.toMap()
+        _uiState.update { it.copy(humanReaderStatuses = statuses) }
+    }
+
+    private fun setHumanReaderStatus(chapterIndex: Int, label: String, progress: Float?) {
+        _uiState.update {
+            it.copy(
+                humanReaderStatuses = it.humanReaderStatuses + (
+                    chapterIndex to HumanReaderChapterStatus(label, progress)
+                )
             )
         }
     }

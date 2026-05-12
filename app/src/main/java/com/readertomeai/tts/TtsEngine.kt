@@ -5,11 +5,14 @@ import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioTrack
+import android.media.MediaPlayer
 import com.k2fsa.sherpa.onnx.OfflineTts
 import com.k2fsa.sherpa.onnx.OfflineTtsConfig
+import com.k2fsa.sherpa.onnx.OfflineTtsKokoroModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsModelConfig
 import com.k2fsa.sherpa.onnx.OfflineTtsVitsModelConfig
 import com.readertomeai.data.model.AvailableVoices
+import com.readertomeai.data.model.VoiceEngine
 import com.readertomeai.data.model.VoiceModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -32,6 +35,14 @@ data class TtsSpeakingProgress(
     val totalSentences: Int = 0,
     val currentSentenceStart: Int = 0,
     val currentSentenceEnd: Int = 0
+)
+
+data class RenderedTtsMark(
+    val index: Int,
+    val startChar: Int,
+    val endChar: Int,
+    val startMs: Long,
+    val endMs: Long
 )
 
 private data class TtsUtterance(
@@ -64,11 +75,14 @@ private const val MIN_TTS_FRAGMENT_WORDS = 8
 private const val TARGET_TTS_FRAGMENT_WORDS = 14
 private const val MAX_TTS_FRAGMENT_WORDS = 18
 private const val MAX_TTS_CHUNK_WORDS = MAX_TTS_FRAGMENT_WORDS
+private const val HUMAN_READER_TARGET_WORDS = 55
+private const val HUMAN_READER_MAX_WORDS = 80
 
 class TtsEngine(private val context: Context) {
 
     private var tts: OfflineTts? = null
     private var audioTrack: AudioTrack? = null
+    private var mediaPlayer: MediaPlayer? = null
     private var speakJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val generatorDispatcher = Executors.newSingleThreadExecutor { runnable ->
@@ -132,6 +146,26 @@ class TtsEngine(private val context: Context) {
             it.isFile && it.name == "tokens.txt"
         }
 
+    private fun findKokoroVoicesFile(voiceDir: File): File? =
+        voiceDir.takeIf { it.exists() }?.walkTopDown()?.firstOrNull {
+            it.isFile && it.name == "voices.bin"
+        }
+
+    private fun findKokoroLexicon(voiceDir: File): String? =
+        voiceDir.takeIf { it.exists() }?.walkTopDown()
+            ?.filter { it.isFile && it.name.startsWith("lexicon-") && it.extension == "txt" }
+            ?.sortedByDescending { file ->
+                when (file.name) {
+                    "lexicon-us-en.txt" -> 3
+                    "lexicon-gb-en.txt" -> 2
+                    "lexicon-zh.txt" -> 1
+                    else -> 0
+                }
+            }
+            ?.take(2)
+            ?.joinToString(",") { it.absolutePath }
+            ?.takeIf { it.isNotBlank() }
+
     private fun findEspeakDataDir(): File? =
         modelsDir.walkTopDown().firstOrNull {
             it.isDirectory && it.name == "espeak-ng-data" && !it.listFiles().isNullOrEmpty()
@@ -142,18 +176,27 @@ class TtsEngine(private val context: Context) {
     fun getDownloadedVoices(): List<VoiceModel> {
         return AvailableVoices.voices.map { voice ->
             val voiceDir = File(modelsDir, voice.id)
-            // Archives may unpack into nested folders, so search recursively
             val modelFile = findVoiceModelFile(voiceDir)
             val tokensFile = findVoiceTokensFile(voiceDir)
-            // espeak-ng-data may also be nested
             val espeakDir = findEspeakDataDir()
+            val voicesFile = findKokoroVoicesFile(voiceDir)
+            val lexicon = findKokoroLexicon(voiceDir)
 
-            if (modelFile != null && tokensFile != null && espeakDir != null) {
+            if (voice.engine == VoiceEngine.PIPER_VITS && modelFile != null && tokensFile != null && espeakDir != null) {
                 voice.copy(
                     isDownloaded = true,
                     localModelPath = modelFile.absolutePath,
                     localTokensPath = tokensFile.absolutePath,
                     localDataDir = espeakDir.absolutePath
+                )
+            } else if (voice.engine == VoiceEngine.KOKORO && modelFile != null && tokensFile != null && espeakDir != null && voicesFile != null) {
+                voice.copy(
+                    isDownloaded = true,
+                    localModelPath = modelFile.absolutePath,
+                    localTokensPath = tokensFile.absolutePath,
+                    localDataDir = espeakDir.absolutePath,
+                    localVoicesPath = voicesFile.absolutePath,
+                    localLexiconPath = lexicon
                 )
             } else {
                 voice
@@ -194,7 +237,12 @@ class TtsEngine(private val context: Context) {
             val modelFile = findVoiceModelFile(voiceDir)
             val tokensFile = findVoiceTokensFile(voiceDir)
             val espeakDir = findEspeakDataDir()
-            modelFile != null && tokensFile != null && espeakDir != null
+            val voicesFile = findKokoroVoicesFile(voiceDir)
+            if (voice.engine == VoiceEngine.KOKORO) {
+                modelFile != null && tokensFile != null && espeakDir != null && voicesFile != null
+            } else {
+                modelFile != null && tokensFile != null && espeakDir != null
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             _downloadProgress.value = null
@@ -304,8 +352,8 @@ class TtsEngine(private val context: Context) {
         return try {
             _state.value = TtsState.LOADING
 
-            val config = OfflineTtsConfig(
-                model = OfflineTtsModelConfig(
+            val modelConfig = when (voice.engine) {
+                VoiceEngine.PIPER_VITS -> OfflineTtsModelConfig(
                     vits = OfflineTtsVitsModelConfig(
                         model = voice.localModelPath!!,
                         tokens = voice.localTokensPath!!,
@@ -315,7 +363,21 @@ class TtsEngine(private val context: Context) {
                     numThreads = 2,
                     debug = false
                 )
-            )
+                VoiceEngine.KOKORO -> OfflineTtsModelConfig(
+                    kokoro = OfflineTtsKokoroModelConfig(
+                        model = voice.localModelPath!!,
+                        voices = voice.localVoicesPath!!,
+                        tokens = voice.localTokensPath!!,
+                        dataDir = voice.localDataDir!!,
+                        lexicon = voice.localLexiconPath.orEmpty(),
+                        lengthScale = 1.0f / speed
+                    ),
+                    numThreads = 4,
+                    debug = false
+                )
+            }
+
+            val config = OfflineTtsConfig(model = modelConfig)
 
             tts?.release()
             tts = OfflineTts(null, config)
@@ -366,7 +428,7 @@ class TtsEngine(private val context: Context) {
 
                             val audio = currentTts.generate(
                                 text = utterance.text,
-                                sid = 0,
+                                sid = _currentVoice.value?.speakerId ?: 0,
                                 speed = playbackSpeed
                             )
 
@@ -439,6 +501,156 @@ class TtsEngine(private val context: Context) {
                     }
                 }
             }
+        }
+    }
+
+    suspend fun renderCurrentVoiceToWav(
+        text: String,
+        wavFile: File,
+        marksFile: File,
+        onProgress: (Float) -> Unit
+    ): Boolean = withContext(generatorDispatcher) {
+        val currentTts = tts ?: return@withContext false
+        val voice = _currentVoice.value ?: return@withContext false
+        val segments = splitIntoHumanReaderSegments(text)
+        val utterances = buildUtterances(text, segments)
+        if (utterances.isEmpty()) return@withContext false
+
+        wavFile.parentFile?.mkdirs()
+        marksFile.parentFile?.mkdirs()
+
+        val marks = mutableListOf<RenderedTtsMark>()
+        var sampleRate = 24_000
+        var totalSamples = 0L
+
+        try {
+            FileOutputStream(wavFile).use { output ->
+                writeWavHeader(output, sampleRate, 0)
+
+                utterances.forEachIndexed { index, utterance ->
+                    ensureActive()
+                    val audio = currentTts.generate(
+                        text = utterance.text,
+                        sid = voice.speakerId,
+                        speed = speed
+                    )
+                    sampleRate = audio.sampleRate
+
+                    val startMs = samplesToMs(totalSamples, sampleRate)
+                    writePcm16Samples(output, audio.samples)
+                    totalSamples += audio.samples.size
+                    val endMs = samplesToMs(totalSamples, sampleRate)
+
+                    marks.add(
+                        RenderedTtsMark(
+                            index = utterance.index,
+                            startChar = utterance.startChar,
+                            endChar = utterance.endChar,
+                            startMs = startMs,
+                            endMs = endMs
+                        )
+                    )
+
+                    if (utterance.pauseAfterMs > 0 && index < utterances.lastIndex) {
+                        val pauseSamples = (sampleRate * utterance.pauseAfterMs / 1000L).toInt()
+                        writeSilence(output, pauseSamples)
+                        totalSamples += pauseSamples
+                    }
+
+                    onProgress((index + 1).toFloat() / utterances.size)
+                }
+            }
+
+            patchWavHeader(wavFile, sampleRate, totalSamples)
+            writeMarks(marksFile, marks)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            wavFile.delete()
+            marksFile.delete()
+            false
+        }
+    }
+
+    fun playRenderedChapter(
+        wavFile: File,
+        marks: List<RenderedTtsMark>,
+        onSentenceStart: ((sentenceIndex: Int, startChar: Int, endChar: Int) -> Unit)? = null,
+        onComplete: (() -> Unit)? = null
+    ) {
+        stop()
+        if (!wavFile.exists()) return
+
+        val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
+        if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return
+
+        isPaused = false
+        isCancelled = false
+        _state.value = TtsState.SPEAKING
+
+        val completed = AtomicBoolean(false)
+        val player = MediaPlayer().apply {
+            setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            setDataSource(wavFile.absolutePath)
+            setOnCompletionListener { completed.set(true) }
+            prepare()
+            start()
+        }
+        mediaPlayer = player
+
+        speakJob = scope.launch {
+            var lastMarkIndex = -1
+            try {
+                while (!isCancelled && isActive && !completed.get()) {
+                    val positionMs = player.currentPosition.toLong()
+                    val mark = marks.lastOrNull { it.startMs <= positionMs }
+                    if (mark != null && mark.index != lastMarkIndex) {
+                        lastMarkIndex = mark.index
+                        _progress.value = TtsSpeakingProgress(
+                            sentenceIndex = mark.index,
+                            totalSentences = marks.size,
+                            currentSentenceStart = mark.startChar,
+                            currentSentenceEnd = mark.endChar
+                        )
+                        withContext(Dispatchers.Main) {
+                            onSentenceStart?.invoke(mark.index, mark.startChar, mark.endChar)
+                        }
+                    }
+                    delay(100)
+                }
+            } finally {
+                try {
+                    player.release()
+                } catch (_: Exception) {}
+                mediaPlayer = null
+                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+                withContext(Dispatchers.Main) {
+                    if (!isCancelled) {
+                        _state.value = TtsState.IDLE
+                        onComplete?.invoke()
+                    }
+                }
+            }
+        }
+    }
+
+    fun readRenderedMarks(marksFile: File): List<RenderedTtsMark> {
+        if (!marksFile.exists()) return emptyList()
+        return marksFile.readLines().mapNotNull { line ->
+            val parts = line.split('\t')
+            if (parts.size != 5) return@mapNotNull null
+            RenderedTtsMark(
+                index = parts[0].toIntOrNull() ?: return@mapNotNull null,
+                startChar = parts[1].toIntOrNull() ?: return@mapNotNull null,
+                endChar = parts[2].toIntOrNull() ?: return@mapNotNull null,
+                startMs = parts[3].toLongOrNull() ?: return@mapNotNull null,
+                endMs = parts[4].toLongOrNull() ?: return@mapNotNull null
+            )
         }
     }
 
@@ -550,6 +762,9 @@ class TtsEngine(private val context: Context) {
         try {
             audioTrack?.pause()
         } catch (_: Exception) {}
+        try {
+            mediaPlayer?.pause()
+        } catch (_: Exception) {}
     }
 
     fun resume() {
@@ -557,6 +772,9 @@ class TtsEngine(private val context: Context) {
         _state.value = TtsState.SPEAKING
         try {
             audioTrack?.play()
+        } catch (_: Exception) {}
+        try {
+            mediaPlayer?.start()
         } catch (_: Exception) {}
     }
 
@@ -571,6 +789,11 @@ class TtsEngine(private val context: Context) {
             audioTrack?.release()
         } catch (_: Exception) {}
         audioTrack = null
+        try {
+            mediaPlayer?.stop()
+            mediaPlayer?.release()
+        } catch (_: Exception) {}
+        mediaPlayer = null
 
         audioManager.abandonAudioFocusRequest(audioFocusRequest)
 
@@ -604,6 +827,53 @@ class TtsEngine(private val context: Context) {
             addSentenceFragments(part, segments)
         }
         return segments
+    }
+
+    private fun splitIntoHumanReaderSegments(text: String): List<TtsTextSegment> {
+        if (text.isBlank()) return emptyList()
+
+        val sentencePattern = Regex("""[^.!?]+(?:[.!?]+["')\]]*)?""")
+        val sentences = sentencePattern
+            .findAll(text)
+            .map { it.value.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
+            .ifEmpty { listOf(text.trim()) }
+
+        val segments = mutableListOf<TtsTextSegment>()
+        var pending = ""
+        sentences.forEach { sentence ->
+            val candidate = if (pending.isBlank()) sentence else "$pending $sentence"
+            if (wordCount(candidate) <= HUMAN_READER_TARGET_WORDS) {
+                pending = candidate
+            } else {
+                if (pending.isNotBlank()) addHumanReaderFragment(pending, segments)
+                pending = sentence
+            }
+        }
+        if (pending.isNotBlank()) addHumanReaderFragment(pending, segments)
+        return segments
+    }
+
+    private fun addHumanReaderFragment(fragment: String, out: MutableList<TtsTextSegment>) {
+        val words = wordsIn(fragment)
+        if (words.size <= HUMAN_READER_MAX_WORDS) {
+            out.add(TtsTextSegment(fragment, endsSentence = true, pauseAfterMs = TTS_SENTENCE_PAUSE_MS))
+            return
+        }
+
+        var wordIndex = 0
+        while (wordIndex < words.size) {
+            val nextIndex = (wordIndex + HUMAN_READER_TARGET_WORDS).coerceAtMost(words.size)
+            out.add(
+                TtsTextSegment(
+                    text = words.subList(wordIndex, nextIndex).joinToString(" "),
+                    endsSentence = nextIndex == words.size,
+                    pauseAfterMs = if (nextIndex == words.size) TTS_SENTENCE_PAUSE_MS else TTS_PHRASE_PAUSE_MS
+                )
+            )
+            wordIndex = nextIndex
+        }
     }
 
     private fun addSentenceFragments(sentence: String, out: MutableList<TtsTextSegment>) {
@@ -718,5 +988,78 @@ class TtsEngine(private val context: Context) {
             wordIndex = nextIndex
         }
     }
+
+    private fun samplesToMs(samples: Long, sampleRate: Int): Long =
+        if (sampleRate <= 0) 0 else samples * 1000L / sampleRate
+
+    private fun writePcm16Samples(output: OutputStream, samples: FloatArray) {
+        val buffer = ByteArray(samples.size * 2)
+        var offset = 0
+        samples.forEach { sample ->
+            val pcm = (sample.coerceIn(-1f, 1f) * Short.MAX_VALUE).toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+            buffer[offset++] = (pcm and 0xff).toByte()
+            buffer[offset++] = ((pcm shr 8) and 0xff).toByte()
+        }
+        output.write(buffer)
+    }
+
+    private fun writeSilence(output: OutputStream, samples: Int) {
+        output.write(ByteArray(samples * 2))
+    }
+
+    private fun writeMarks(file: File, marks: List<RenderedTtsMark>) {
+        file.writeText(
+            marks.joinToString("\n") {
+                "${it.index}\t${it.startChar}\t${it.endChar}\t${it.startMs}\t${it.endMs}"
+            }
+        )
+    }
+
+    private fun writeWavHeader(output: OutputStream, sampleRate: Int, totalSamples: Long) {
+        val dataBytes = (totalSamples * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        val byteRate = sampleRate * 2
+        output.write("RIFF".toByteArray(Charsets.US_ASCII))
+        writeIntLe(output, 36 + dataBytes)
+        output.write("WAVEfmt ".toByteArray(Charsets.US_ASCII))
+        writeIntLe(output, 16)
+        writeShortLe(output, 1)
+        writeShortLe(output, 1)
+        writeIntLe(output, sampleRate)
+        writeIntLe(output, byteRate)
+        writeShortLe(output, 2)
+        writeShortLe(output, 16)
+        output.write("data".toByteArray(Charsets.US_ASCII))
+        writeIntLe(output, dataBytes)
+    }
+
+    private fun patchWavHeader(file: File, sampleRate: Int, totalSamples: Long) {
+        RandomAccessFile(file, "rw").use { raf ->
+            val dataBytes = (totalSamples * 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            raf.seek(4)
+            raf.write(intLeBytes(36 + dataBytes))
+            raf.seek(24)
+            raf.write(intLeBytes(sampleRate))
+            raf.seek(28)
+            raf.write(intLeBytes(sampleRate * 2))
+            raf.seek(40)
+            raf.write(intLeBytes(dataBytes))
+        }
+    }
+
+    private fun writeIntLe(output: OutputStream, value: Int) {
+        output.write(intLeBytes(value))
+    }
+
+    private fun writeShortLe(output: OutputStream, value: Int) {
+        output.write(byteArrayOf((value and 0xff).toByte(), ((value shr 8) and 0xff).toByte()))
+    }
+
+    private fun intLeBytes(value: Int): ByteArray =
+        byteArrayOf(
+            (value and 0xff).toByte(),
+            ((value shr 8) and 0xff).toByte(),
+            ((value shr 16) and 0xff).toByte(),
+            ((value shr 24) and 0xff).toByte()
+        )
 
 }

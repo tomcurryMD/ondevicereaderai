@@ -226,6 +226,7 @@ fun ReaderScreen(
             TocDrawer(
                 toc = uiState.tableOfContents,
                 currentChapter = uiState.currentChapter,
+                humanReaderStatuses = uiState.humanReaderStatuses,
                 onChapterSelect = {
                     viewModel.goToChapter(it)
                     viewModel.hideToc()
@@ -488,6 +489,7 @@ fun TtsControlBar(
 fun TocDrawer(
     toc: List<com.readertomeai.data.model.TocEntry>,
     currentChapter: Int,
+    humanReaderStatuses: Map<Int, HumanReaderChapterStatus>,
     onChapterSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -508,12 +510,25 @@ fun TocDrawer(
                             Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Purple))
                             Spacer(modifier = Modifier.width(12.dp))
                         }
-                        Text(
-                            entry.title,
-                            fontWeight = if (entry.chapterIndex == currentChapter) FontWeight.Bold else FontWeight.Normal,
-                            color = if (entry.chapterIndex == currentChapter) Purple else MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.padding(start = if (entry.chapterIndex != currentChapter) 20.dp else 0.dp)
-                        )
+                        Column(modifier = Modifier.padding(start = if (entry.chapterIndex != currentChapter) 20.dp else 0.dp)) {
+                            Text(
+                                entry.title,
+                                fontWeight = if (entry.chapterIndex == currentChapter) FontWeight.Bold else FontWeight.Normal,
+                                color = if (entry.chapterIndex == currentChapter) Purple else MaterialTheme.colorScheme.onSurface
+                            )
+                            humanReaderStatuses[entry.chapterIndex]?.let { status ->
+                                val progress = status.progress
+                                Text(
+                                    if (progress != null) {
+                                        "Human Reader: ${status.label} ${(progress * 100).toInt()}%"
+                                    } else {
+                                        "Human Reader: ${status.label}"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                     if (entry != toc.last()) {
                         HorizontalDivider(modifier = Modifier.padding(horizontal = 8.dp))

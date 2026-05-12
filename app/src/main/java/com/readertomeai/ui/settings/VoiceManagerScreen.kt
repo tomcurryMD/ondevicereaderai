@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.readertomeai.data.model.VoiceEngine
 import com.readertomeai.data.model.VoiceModel
 import com.readertomeai.data.model.VoiceQuality
 import com.readertomeai.ui.theme.Purple
@@ -29,6 +30,7 @@ fun VoiceManagerScreen(
 ) {
     val voices by viewModel.voices.collectAsState()
     val selectedVoiceId by viewModel.selectedVoiceId.collectAsState()
+    val selectedHumanVoiceId by viewModel.selectedHumanVoiceId.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
     val downloadingVoiceId by viewModel.downloadingVoiceId.collectAsState()
     val downloadError by viewModel.downloadError.collectAsState()
@@ -84,7 +86,7 @@ fun VoiceManagerScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Text(
                             "Voice models are powered by Piper TTS and run entirely on your device. " +
-                            "Download a model to get started with natural-sounding text-to-speech.",
+                            "Instant Reader uses compact Piper voices. Human Reader uses a larger Kokoro model that prepares chapter audio before playback.",
                             fontSize = 13.sp,
                             lineHeight = 18.sp
                         )
@@ -95,7 +97,11 @@ fun VoiceManagerScreen(
             items(voices) { voice ->
                 VoiceCard(
                     voice = voice,
-                    isSelected = voice.id == selectedVoiceId && voice.isDownloaded,
+                    isSelected = voice.isDownloaded && if (voice.engine == VoiceEngine.KOKORO) {
+                        voice.id == selectedHumanVoiceId
+                    } else {
+                        voice.id == selectedVoiceId
+                    },
                     isDownloading = voice.id == downloadingVoiceId,
                     downloadProgress = if (voice.id == downloadingVoiceId) downloadProgress else null,
                     onDownload = { viewModel.downloadVoice(voice) },
@@ -172,6 +178,11 @@ fun VoiceCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+                    Text(
+                        if (voice.engine == VoiceEngine.KOKORO) "Human Reader" else "Instant Reader",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
 
                 // Action button

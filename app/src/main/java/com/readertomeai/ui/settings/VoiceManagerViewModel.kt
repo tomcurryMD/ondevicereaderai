@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.readertomeai.ReaderToMeApp
 import com.readertomeai.data.model.AvailableVoices
+import com.readertomeai.data.model.VoiceEngine
 import com.readertomeai.data.model.VoiceModel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -18,6 +19,9 @@ class VoiceManagerViewModel : ViewModel() {
 
     val selectedVoiceId = settings.selectedVoiceId
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AvailableVoices.DEFAULT_VOICE_ID)
+
+    val selectedHumanVoiceId = settings.selectedHumanVoiceId
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), AvailableVoices.HUMAN_READER_VOICE_ID)
 
     private val _downloadingVoiceId = MutableStateFlow<String?>(null)
     val downloadingVoiceId: StateFlow<String?> = _downloadingVoiceId
@@ -45,7 +49,7 @@ class VoiceManagerViewModel : ViewModel() {
                 _downloadingVoiceId.value = null
                 if (success) {
                     refreshVoices()
-                    val downloaded = ttsEngine.getDownloadedVoices().filter { it.isDownloaded }
+                    val downloaded = ttsEngine.getDownloadedVoices().filter { it.isDownloaded && it.engine == voice.engine }
                     if (downloaded.size == 1) {
                         selectVoice(voice.id)
                     }
@@ -65,7 +69,12 @@ class VoiceManagerViewModel : ViewModel() {
 
     fun selectVoice(voiceId: String) {
         viewModelScope.launch {
-            settings.setSelectedVoice(voiceId)
+            val voice = AvailableVoices.voices.find { it.id == voiceId }
+            if (voice?.engine == VoiceEngine.KOKORO) {
+                settings.setSelectedHumanVoice(voiceId)
+            } else {
+                settings.setSelectedVoice(voiceId)
+            }
             ttsEngine.initializeVoice(voiceId)
         }
     }
