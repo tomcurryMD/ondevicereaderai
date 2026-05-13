@@ -62,7 +62,7 @@ object AvailableVoices {
 
     const val DEFAULT_VOICE_ID = "vits-piper-en_US-lessac-medium"
     const val COMPACT_FALLBACK_VOICE_ID = "vits-piper-en_US-ryan-high-int8"
-    const val HUMAN_READER_VOICE_ID = "kokoro-int8-multi-lang-v1_1"
+    const val HUMAN_READER_VOICE_ID = "kokoro-en-v0_19"
 
     private const val BASE =
         "https://huggingface.co/rhasspy/piper-voices/resolve/main/en"
@@ -77,15 +77,15 @@ object AvailableVoices {
     val voices = listOf(
         VoiceModel(
             id = HUMAN_READER_VOICE_ID,
-            name = "Human Reader (Kokoro)",
+            name = "Human Reader (Kokoro English)",
             language = "en-US",
             quality = VoiceQuality.HIGH,
             engine = VoiceEngine.KOKORO,
             sampleRate = 24000,
-            modelUrl = "$SHERPA_BASE/kokoro-int8-multi-lang-v1_1.tar.bz2",
+            modelUrl = "$SHERPA_BASE/kokoro-en-v0_19.tar.bz2",
             tokensUrl = "",
-            sizeInMb = 180,
-            speakerId = 16
+            sizeInMb = 350,
+            speakerId = 10
         ),
         VoiceModel(
             id = "vits-piper-en_US-ryan-high-int8",

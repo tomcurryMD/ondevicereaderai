@@ -6,10 +6,12 @@ import androidx.lifecycle.viewModelScope
 import com.readertomeai.ReaderToMeApp
 import com.readertomeai.data.model.*
 import com.readertomeai.epub.DocumentParser
+import com.readertomeai.tts.HumanReaderPreparationService
 import com.readertomeai.tts.TtsPlaybackService
 import com.readertomeai.tts.TtsState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -46,7 +48,12 @@ data class ReaderUiState(
     val selectedTextStart: Int = 0,
     val selectedTextEnd: Int = 0,
     val ttsStatusMessage: String? = null,
-    val humanReaderStatuses: Map<Int, HumanReaderChapterStatus> = emptyMap()
+    val humanReaderStatuses: Map<Int, HumanReaderChapterStatus> = emptyMap(),
+    val readerMode: ReaderMode = ReaderMode.INSTANT,
+    val isHumanReaderPreparing: Boolean = false,
+    val humanReaderRequiredChapters: List<Int> = emptyList(),
+    val humanReaderReadyCount: Int = 0,
+    val humanReaderPlayableChapter: Int? = null
 )
 
 class ReaderViewModel : ViewModel() {
@@ -69,6 +76,7 @@ class ReaderViewModel : ViewModel() {
     private var ttsResumeOffset: Int = 0
     private var selectedPlaybackStartPending: Boolean = false
     private var selectionResolveJob: Job? = null
+    private var humanReaderPrepareJob: Job? = null
 
     /**
      * Callback set by ReaderScreen to execute JS in the WebView.
@@ -97,6 +105,49 @@ class ReaderViewModel : ViewModel() {
                 }
             }.collect()
         }
+
+        viewModelScope.launch {
+            settings.readerMode.collect { mode ->
+                _uiState.update { it.copy(readerMode = mode) }
+            }
+        }
+
+        viewModelScope.launch {
+            HumanReaderPreparationService.progress.collect { prep ->
+                val book = _uiState.value.book ?: return@collect
+                if (prep.bookId != book.id) return@collect
+
+                refreshHumanReaderStatuses(book.id, _uiState.value.totalChapters)
+                _uiState.update { state ->
+                    val activeStatuses = if (prep.isRunning && prep.currentChapter != null) {
+                        state.humanReaderStatuses + (
+                            prep.currentChapter to HumanReaderChapterStatus(
+                                "Preparing",
+                                prep.currentChapterProgress
+                            )
+                        )
+                    } else {
+                        state.humanReaderStatuses.filterValues {
+                            it.label != "Queued" && it.label != "Preparing"
+                        }
+                    }
+                    state.copy(
+                        isHumanReaderPreparing = prep.isRunning,
+                        ttsStatusMessage = prep.message,
+                        humanReaderStatuses = activeStatuses,
+                        humanReaderReadyCount = readyHumanReaderChapterCount(
+                            statuses = activeStatuses,
+                            requiredChapters = state.humanReaderRequiredChapters
+                        ),
+                        humanReaderPlayableChapter = firstPlayableHumanReaderChapterFromStatuses(
+                            statuses = activeStatuses,
+                            requiredChapters = state.humanReaderRequiredChapters,
+                            startChapter = state.currentChapter
+                        )
+                    )
+                }
+            }
+        }
     }
 
     fun loadBook(bookId: Long) {
@@ -120,6 +171,9 @@ class ReaderViewModel : ViewModel() {
 
             val toc = withContext(Dispatchers.IO) { parser.getTableOfContents() }
             val totalChapters = parser.getChapterCount()
+            val humanReaderRequiredChapters = withContext(Dispatchers.IO) {
+                findHumanReaderRequiredChapters(totalChapters)
+            }
             val initialChapter = withContext(Dispatchers.IO) {
                 findReadableChapter(book.currentChapter, totalChapters)
             }
@@ -134,7 +188,13 @@ class ReaderViewModel : ViewModel() {
                     totalChapters = totalChapters,
                     tableOfContents = toc,
                     currentChapter = initialChapter,
-                    savedScrollPosition = initialPosition
+                    savedScrollPosition = initialPosition,
+                    humanReaderRequiredChapters = humanReaderRequiredChapters,
+                    humanReaderPlayableChapter = firstPlayableHumanReaderChapterFromStatuses(
+                        statuses = it.humanReaderStatuses,
+                        requiredChapters = humanReaderRequiredChapters,
+                        startChapter = initialChapter
+                    )
                 )
             }
 
@@ -156,6 +216,7 @@ class ReaderViewModel : ViewModel() {
 
             // Initialize TTS
             viewModelScope.launch(Dispatchers.IO) {
+                if (HumanReaderPreparationService.isPreparingAny()) return@launch
                 settings.migrateTtsDefaultsIfNeeded()
                 ttsEngine.ensureBundledDefaultVoiceInstalled()
                 settings.ttsSpeed.first().let { speed ->
@@ -200,6 +261,9 @@ class ReaderViewModel : ViewModel() {
     private fun hasSubstantialReadableText(chapterIndex: Int): Boolean =
         parser.getPlainTextForChapter(chapterIndex).length >= MIN_READABLE_CHAPTER_CHARS
 
+    private fun findHumanReaderRequiredChapters(totalChapters: Int): List<Int> =
+        (0 until totalChapters).filter { parser.getPlainTextForChapter(it).isNotBlank() }
+
     private fun loadChapterHtml(chapterIndex: Int) {
         viewModelScope.launch {
             val state = _uiState.value
@@ -226,7 +290,16 @@ class ReaderViewModel : ViewModel() {
         ttsEngine.stop()
         resetTtsResume()
         currentScrollProgress = 0f
-        _uiState.update { it.copy(savedScrollPosition = 0f) }
+        _uiState.update {
+            it.copy(
+                savedScrollPosition = 0f,
+                humanReaderPlayableChapter = firstPlayableHumanReaderChapterFromStatuses(
+                    statuses = it.humanReaderStatuses,
+                    requiredChapters = it.humanReaderRequiredChapters,
+                    startChapter = index
+                )
+            )
+        }
         loadChapterHtml(index)
         saveProgress(index, 0f)
         _uiState.value.book?.let { refreshHumanReaderStatuses(it.id, _uiState.value.totalChapters) }
@@ -423,6 +496,121 @@ class ReaderViewModel : ViewModel() {
         viewModelScope.launch { repo.removeHighlight(highlight) }
     }
 
+    fun prepareCurrentHumanReaderChapter() {
+        prepareAllHumanReaderChapters()
+    }
+
+    fun prepareNextHumanReaderChapters(count: Int = 3) {
+        prepareAllHumanReaderChapters()
+    }
+
+    fun prepareAllHumanReaderChapters() {
+        prepareHumanReaderChapters(_uiState.value.humanReaderRequiredChapters)
+    }
+
+    fun downloadHumanReaderBook() {
+        prepareAllHumanReaderChapters()
+    }
+
+    fun setReaderMode(mode: ReaderMode) {
+        viewModelScope.launch {
+            if (mode != _uiState.value.readerMode) {
+                stopTts()
+            }
+            if (mode == ReaderMode.INSTANT) {
+                pauseHumanReaderPreparationForInstant()
+            }
+            settings.setReaderMode(mode)
+            _uiState.update { state ->
+                val message = if (mode == ReaderMode.HUMAN && !state.isHumanReaderBookReady()) {
+                    if (state.humanReaderPlayableChapter != null) {
+                        "Human Reader can play prepared chapters while the rest downloads."
+                    } else {
+                        "Download Human Reader chapters before playback."
+                    }
+                } else {
+                    state.ttsStatusMessage
+                }
+                state.copy(readerMode = mode, ttsStatusMessage = message)
+            }
+        }
+    }
+
+    fun cancelHumanReaderPreparation() {
+        humanReaderPrepareJob?.cancel()
+        humanReaderPrepareJob = null
+        stopHumanReaderPreparationService()
+        _uiState.update { state ->
+            state.copy(
+                isHumanReaderPreparing = false,
+                ttsStatusMessage = "Human Reader preparation stopped.",
+                humanReaderStatuses = state.humanReaderStatuses.filterValues {
+                    it.label != "Queued" && it.label != "Preparing"
+                }
+            )
+        }
+    }
+
+    private suspend fun pauseHumanReaderPreparationForInstant() {
+        humanReaderPrepareJob?.cancelAndJoin()
+        humanReaderPrepareJob = null
+        stopHumanReaderPreparationService()
+        _uiState.update { state ->
+            state.copy(
+                isHumanReaderPreparing = false,
+                ttsStatusMessage = null,
+                humanReaderStatuses = state.humanReaderStatuses.filterValues {
+                    it.label != "Queued" && it.label != "Preparing"
+                }
+            )
+        }
+    }
+
+    private fun prepareHumanReaderChapters(chapterIndices: List<Int>) {
+        val state = _uiState.value
+        val book = state.book ?: return
+        if (state.humanReaderRequiredChapters.isEmpty()) {
+            _uiState.update { it.copy(ttsStatusMessage = "This book has no readable chapters for Human Reader.") }
+            return
+        }
+        val boundedChapters = chapterIndices
+            .filter { it in state.humanReaderRequiredChapters }
+            .distinct()
+
+        if (boundedChapters.isEmpty()) return
+
+        stopTts()
+        humanReaderPrepareJob?.cancel()
+        humanReaderPrepareJob = viewModelScope.launch {
+            settings.migrateTtsDefaultsIfNeeded()
+            val voice = selectedHumanVoice()
+            val pendingChapters = boundedChapters.filterNot {
+                humanReaderChapterReady(book.id, voice.id, it, 0)
+            }
+            if (pendingChapters.isEmpty()) {
+                refreshHumanReaderStatuses(book.id, state.totalChapters)
+                _uiState.update {
+                    it.copy(
+                        isHumanReaderPreparing = false,
+                        ttsStatusMessage = "Human Reader is ready."
+                    )
+                }
+                humanReaderPrepareJob = null
+                return@launch
+            }
+
+            pendingChapters.forEach { setHumanReaderStatus(it, "Queued", null) }
+            _uiState.update {
+                it.copy(
+                    isHumanReaderPreparing = true,
+                    ttsStatusMessage = "Preparing full Human Reader book: ${it.humanReaderReadyCount}/${it.humanReaderRequiredChapters.size} chapters ready. This can run overnight."
+                )
+            }
+            startHumanReaderPreparationService(book, voice.id)
+            humanReaderPrepareJob = null
+        }
+    }
+
     // â”€â”€ TTS Controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fun playTts() {
@@ -435,6 +623,7 @@ class ReaderViewModel : ViewModel() {
                 return@launch
             }
 
+            pauseHumanReaderPreparationForInstant()
             settings.migrateTtsDefaultsIfNeeded()
             ttsEngine.speed = settings.ttsSpeed.first()
             val selectedVoiceId = settings.selectedVoiceId.first()
@@ -497,76 +686,75 @@ class ReaderViewModel : ViewModel() {
     }
 
     private suspend fun playHumanReaderTts(state: ReaderUiState, book: Book) {
-        settings.migrateTtsDefaultsIfNeeded()
-        ttsEngine.speed = settings.ttsSpeed.first()
-        val selectedVoiceId = settings.selectedHumanVoiceId.first()
-        val voice = AvailableVoices.voices.find { it.id == selectedVoiceId }
-            ?: AvailableVoices.voices.first { it.id == AvailableVoices.HUMAN_READER_VOICE_ID }
-
-        val humanVoiceReady = withContext(Dispatchers.IO) {
-            val downloaded = ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
-            if (downloaded) {
-                ttsEngine.initializeVoice(voice.id)
-            } else {
-                withContext(Dispatchers.Main) {
-                    _uiState.update {
-                        it.copy(ttsStatusMessage = "Downloading Human Reader model. This is a one-time download.")
-                    }
-                }
-                ttsEngine.downloadAndInitializeVoice(voice)
-            }
+        val currentState = _uiState.value
+        if (currentState.humanReaderRequiredChapters.isEmpty()) {
+            _uiState.update { it.copy(ttsStatusMessage = "This book has no readable chapters for Human Reader.") }
+            return
         }
 
-        if (!humanVoiceReady) {
-            val downloaded = withContext(Dispatchers.IO) {
-                ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
+        settings.migrateTtsDefaultsIfNeeded()
+        ttsEngine.speed = settings.ttsSpeed.first()
+        val voice = selectedHumanVoice()
+
+        if (!ensureHumanReaderVoiceReady(voice)) return
+
+        val chapterForPlayback = firstPlayableHumanReaderChapter(
+            bookId = book.id,
+            voiceId = voice.id,
+            state = currentState,
+            startChapter = state.currentChapter
+        )
+        if (chapterForPlayback == null) {
+            refreshHumanReaderStatuses(book.id, state.totalChapters)
+            _uiState.update {
+                it.copy(
+                    ttsStatusMessage = if (it.isHumanReaderPreparing) {
+                        "Human Reader is still preparing the next playable chapter."
+                    } else {
+                        "Download Human Reader chapters before playback."
+                    }
+                )
             }
-            val message = if (downloaded) {
-                "Human Reader model is downloaded but could not start. Try restarting the app."
-            } else {
-                "Could not download Human Reader model. Check connection and free storage."
-            }
-            _uiState.update { it.copy(ttsStatusMessage = message) }
             return
+        }
+
+        if (chapterForPlayback != state.currentChapter) {
+            currentScrollProgress = 0f
+            resetTtsResume()
+            _uiState.update { it.copy(savedScrollPosition = 0f) }
+            loadChapterHtml(chapterForPlayback)
+            saveProgress(chapterForPlayback, 0f)
         }
 
         val text = withContext(Dispatchers.IO) {
-            parser.getPlainTextForChapter(state.currentChapter)
+            parser.getPlainTextForChapter(chapterForPlayback)
         }
         if (text.isBlank()) return
 
-        val chapterForPlayback = state.currentChapter
-        val startOffset = resolveTtsStartOffset(chapterForPlayback, text)
-        val textToRead = text.substring(startOffset)
-        if (textToRead.isBlank()) {
-            resetTtsResume()
+        val resolvedStartOffset = if (chapterForPlayback == state.currentChapter) {
+            resolveTtsStartOffset(chapterForPlayback, text)
+        } else {
+            0
+        }
+        val startOffset = if (resolvedStartOffset >= text.length - 50) 0 else resolvedStartOffset
+        val files = humanReaderFiles(book.id, voice.id, chapterForPlayback, 0)
+        if (!isHumanReaderCacheReady(files)) {
+            refreshHumanReaderStatuses(book.id, state.totalChapters)
+            _uiState.update { it.copy(ttsStatusMessage = "Human Reader is not ready yet.") }
             return
         }
 
-        val files = humanReaderFiles(book.id, voice.id, chapterForPlayback, startOffset)
-        if (!files.wav.exists() || !files.marks.exists()) {
-            setHumanReaderStatus(chapterForPlayback, "Preparing", 0f)
-            _uiState.update { it.copy(ttsStatusMessage = "Human Reader is preparing this chapter.") }
-            val rendered = ttsEngine.renderCurrentVoiceToWav(
-                text = textToRead,
-                wavFile = files.wav,
-                marksFile = files.marks
-            ) { progress ->
-                setHumanReaderStatus(chapterForPlayback, "Preparing", progress)
-                _uiState.update {
-                    it.copy(ttsStatusMessage = "Human Reader preparing chapter ${(progress * 100).toInt()}%")
-                }
-            }
-
-            if (!rendered) {
-                setHumanReaderStatus(chapterForPlayback, "Failed", null)
-                _uiState.update { it.copy(ttsStatusMessage = "Human Reader could not prepare this chapter.") }
-                return
-            }
-        }
-
         setHumanReaderStatus(chapterForPlayback, "Ready", null)
-        _uiState.update { it.copy(error = null, ttsStatusMessage = null) }
+        _uiState.update {
+            it.copy(
+                error = null,
+                ttsStatusMessage = if (chapterForPlayback != state.currentChapter) {
+                    "Playing the first prepared Human Reader chapter."
+                } else {
+                    null
+                }
+            )
+        }
 
         val ctx = ReaderToMeApp.instance
         val intent = Intent(ctx, TtsPlaybackService::class.java).apply {
@@ -578,14 +766,16 @@ class ReaderViewModel : ViewModel() {
         val shouldHighlight = settings.highlightDuringTts.first()
         val shouldAutoScroll = settings.autoScrollDuringTts.first()
         val marks = ttsEngine.readRenderedMarks(files.marks)
+        val startMs = marks.firstOrNull { it.endChar >= startOffset }?.startMs ?: 0L
 
         selectedPlaybackStartPending = false
         ttsEngine.playRenderedChapter(
             wavFile = files.wav,
             marks = marks,
+            startMs = startMs,
             onSentenceStart = { _, start, end ->
-                val absoluteStart = (startOffset + start).coerceIn(0, text.length)
-                val absoluteEnd = (startOffset + end).coerceIn(absoluteStart, text.length)
+                val absoluteStart = start.coerceIn(0, text.length)
+                val absoluteEnd = end.coerceIn(absoluteStart, text.length)
                 rememberTtsPosition(chapterForPlayback, absoluteStart, text.length)
                 if (shouldHighlight) {
                     evaluateJavascript?.invoke("highlightSentence($absoluteStart, $absoluteEnd, $shouldAutoScroll);")
@@ -594,19 +784,138 @@ class ReaderViewModel : ViewModel() {
                 }
             },
             onComplete = {
-                if (chapterForPlayback < state.totalChapters - 1) {
+                val latestState = _uiState.value
+                val nextReadyChapter = firstPlayableHumanReaderChapter(
+                    bookId = book.id,
+                    voiceId = voice.id,
+                    state = latestState,
+                    startChapter = chapterForPlayback + 1
+                )
+                if (nextReadyChapter != null) {
                     resetTtsResume()
-                    nextChapter()
+                    goToChapter(nextReadyChapter)
                     playTts()
                 } else {
                     resetTtsResume()
                     stopTts()
+                    _uiState.update {
+                        it.copy(
+                            ttsStatusMessage = if (it.isHumanReaderPreparing) {
+                                "Reached the end of prepared Human Reader audio. Download is still preparing more."
+                            } else if (it.isHumanReaderBookReady()) {
+                                "Human Reader finished."
+                            } else {
+                                "Reached the end of prepared Human Reader audio. Resume the download for more chapters."
+                            }
+                        )
+                    }
                 }
             }
         )
     }
 
-    private data class HumanReaderFiles(val wav: File, val marks: File)
+    private suspend fun selectedHumanVoice(): VoiceModel {
+        val selectedVoiceId = settings.selectedHumanVoiceId.first()
+        return AvailableVoices.voices.find { it.id == selectedVoiceId }
+            ?: AvailableVoices.voices.first { it.id == AvailableVoices.HUMAN_READER_VOICE_ID }
+    }
+
+    private suspend fun ensureHumanReaderVoiceReady(voice: VoiceModel): Boolean {
+        if (ttsEngine.currentVoice.value?.id == voice.id) return true
+
+        val downloaded = withContext(Dispatchers.IO) {
+            ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
+        }
+
+        val ready = if (downloaded) {
+            withContext(Dispatchers.IO) { ttsEngine.initializeVoice(voice.id) }
+        } else {
+            _uiState.update {
+                it.copy(ttsStatusMessage = "Downloading Human Reader model. This is a one-time download.")
+            }
+            withContext(Dispatchers.IO) { ttsEngine.downloadAndInitializeVoice(voice) }
+        }
+
+        if (!ready) {
+            val nowDownloaded = withContext(Dispatchers.IO) {
+                ttsEngine.getDownloadedVoices().any { it.id == voice.id && it.isDownloaded }
+            }
+            val message = if (nowDownloaded) {
+                "Human Reader model is downloaded but could not start. Try restarting the app."
+            } else {
+                "Could not download Human Reader model. Check connection and free storage."
+            }
+            _uiState.update { it.copy(ttsStatusMessage = message) }
+        }
+
+        return ready
+    }
+
+    private suspend fun prepareHumanReaderChapter(
+        book: Book,
+        voice: VoiceModel,
+        chapterIndex: Int,
+        startOffset: Int,
+        textOverride: String?,
+        progressMessage: ((Float) -> String)? = null
+    ): Boolean {
+        val files = humanReaderFiles(book.id, voice.id, chapterIndex, startOffset)
+        if (isHumanReaderCacheReady(files)) return true
+        files.tempWav.delete()
+        files.tempMarks.delete()
+
+        val text = textOverride ?: withContext(Dispatchers.IO) {
+            parser.getPlainTextForChapter(chapterIndex)
+        }
+        val boundedStart = startOffset.coerceIn(0, text.length)
+        val textToRead = text.substring(boundedStart)
+        if (textToRead.isBlank()) {
+            setHumanReaderStatus(chapterIndex, "Failed", null)
+            return false
+        }
+
+        val estimatedBytes = estimateHumanReaderAudioBytes(textToRead)
+        if (!hasEnoughHumanReaderStorage(estimatedBytes)) {
+            setHumanReaderStatus(chapterIndex, "Failed", null)
+            _uiState.update { it.copy(ttsStatusMessage = humanReaderStorageMessage(estimatedBytes)) }
+            return false
+        }
+
+        setHumanReaderStatus(chapterIndex, "Preparing", 0f)
+        val rendered = ttsEngine.renderCurrentVoiceToWav(
+            text = textToRead,
+            wavFile = files.tempWav,
+            marksFile = files.tempMarks
+        ) { progress ->
+            setHumanReaderStatus(chapterIndex, "Preparing", progress)
+            progressMessage?.invoke(progress)?.let { message ->
+                _uiState.update { it.copy(ttsStatusMessage = message) }
+            }
+        }
+
+        val committed = rendered && commitHumanReaderCache(files)
+        setHumanReaderStatus(
+            chapterIndex = chapterIndex,
+            label = if (committed) {
+                if (startOffset <= 0) "Ready" else "Ready from here"
+            } else {
+                "Failed"
+            },
+            progress = null
+        )
+        if (!committed) {
+            files.tempWav.delete()
+            files.tempMarks.delete()
+        }
+        return committed
+    }
+
+    private data class HumanReaderFiles(
+        val wav: File,
+        val marks: File,
+        val tempWav: File,
+        val tempMarks: File
+    )
 
     private fun humanReaderFiles(
         bookId: Long,
@@ -615,35 +924,212 @@ class ReaderViewModel : ViewModel() {
         startOffset: Int
     ): HumanReaderFiles {
         val safeVoiceId = voiceId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
-        val dir = File(ReaderToMeApp.instance.filesDir, "human_reader/book_$bookId/$safeVoiceId")
+        val dir = humanReaderCacheDir(bookId, safeVoiceId)
         val suffix = if (startOffset <= 0) "full" else "from_$startOffset"
+        val wav = File(dir, "chapter_${chapterIndex}_$suffix.wav")
+        val marks = File(dir, "chapter_${chapterIndex}_$suffix.marks")
         return HumanReaderFiles(
-            wav = File(dir, "chapter_${chapterIndex}_$suffix.wav"),
-            marks = File(dir, "chapter_${chapterIndex}_$suffix.marks")
+            wav = wav,
+            marks = marks,
+            tempWav = File(dir, "${wav.name}.tmp"),
+            tempMarks = File(dir, "${marks.name}.tmp")
         )
+    }
+
+    private fun humanReaderCacheDir(bookId: Long, safeVoiceId: String): File =
+        File(ReaderToMeApp.instance.filesDir, "human_reader/book_$bookId/$safeVoiceId")
+
+    private fun humanReaderChapterReady(
+        bookId: Long,
+        voiceId: String,
+        chapterIndex: Int,
+        startOffset: Int
+    ): Boolean {
+        val files = humanReaderFiles(bookId, voiceId, chapterIndex, startOffset)
+        return isHumanReaderCacheReady(files)
     }
 
     private fun refreshHumanReaderStatuses(bookId: Long, totalChapters: Int) {
         val voiceId = AvailableVoices.HUMAN_READER_VOICE_ID
         val statuses = (0 until totalChapters).mapNotNull { chapterIndex ->
             val files = humanReaderFiles(bookId, voiceId, chapterIndex, 0)
-            if (files.wav.exists() && files.marks.exists()) {
+            if (isHumanReaderCacheReady(files)) {
                 chapterIndex to HumanReaderChapterStatus("Ready")
             } else {
                 null
             }
         }.toMap()
-        _uiState.update { it.copy(humanReaderStatuses = statuses) }
+        _uiState.update { state ->
+            val activeStatuses = state.humanReaderStatuses.filterValues {
+                it.label != "Ready" && it.label != "Ready from here"
+            }
+            val mergedStatuses = activeStatuses + statuses
+            state.copy(
+                humanReaderStatuses = mergedStatuses,
+                humanReaderReadyCount = readyHumanReaderChapterCount(
+                    statuses = mergedStatuses,
+                    requiredChapters = state.humanReaderRequiredChapters
+                ),
+                humanReaderPlayableChapter = firstPlayableHumanReaderChapterFromStatuses(
+                    statuses = mergedStatuses,
+                    requiredChapters = state.humanReaderRequiredChapters,
+                    startChapter = state.currentChapter
+                )
+            )
+        }
     }
 
     private fun setHumanReaderStatus(chapterIndex: Int, label: String, progress: Float?) {
         _uiState.update {
+            val statuses = it.humanReaderStatuses + (
+                chapterIndex to HumanReaderChapterStatus(label, progress)
+            )
             it.copy(
-                humanReaderStatuses = it.humanReaderStatuses + (
-                    chapterIndex to HumanReaderChapterStatus(label, progress)
+                humanReaderStatuses = statuses,
+                humanReaderReadyCount = readyHumanReaderChapterCount(
+                    statuses = statuses,
+                    requiredChapters = it.humanReaderRequiredChapters
+                ),
+                humanReaderPlayableChapter = firstPlayableHumanReaderChapterFromStatuses(
+                    statuses = statuses,
+                    requiredChapters = it.humanReaderRequiredChapters,
+                    startChapter = it.currentChapter
                 )
             )
         }
+    }
+
+    private fun readyHumanReaderChapterCount(
+        statuses: Map<Int, HumanReaderChapterStatus>,
+        requiredChapters: List<Int>
+    ): Int = requiredChapters.count { statuses[it]?.label == "Ready" }
+
+    private fun ReaderUiState.isHumanReaderBookReady(): Boolean =
+        humanReaderRequiredChapters.isNotEmpty() &&
+            humanReaderReadyCount >= humanReaderRequiredChapters.size
+
+    private fun firstPlayableHumanReaderChapter(
+        bookId: Long,
+        voiceId: String,
+        state: ReaderUiState,
+        startChapter: Int
+    ): Int? {
+        val readyChapters = state.humanReaderRequiredChapters.filter { chapterIndex ->
+            humanReaderChapterReady(bookId, voiceId, chapterIndex, 0)
+        }
+        return readyChapters.firstOrNull { it >= startChapter } ?: readyChapters.firstOrNull()
+    }
+
+    private fun firstPlayableHumanReaderChapterFromStatuses(
+        statuses: Map<Int, HumanReaderChapterStatus>,
+        requiredChapters: List<Int>,
+        startChapter: Int
+    ): Int? {
+        val readyChapters = requiredChapters.filter { chapterIndex ->
+            statuses[chapterIndex]?.label == "Ready"
+        }
+        return readyChapters.firstOrNull { it >= startChapter } ?: readyChapters.firstOrNull()
+    }
+
+    private fun isHumanReaderCacheReady(files: HumanReaderFiles): Boolean {
+        val ready = isValidWavFile(files.wav) && isValidMarksFile(files.marks)
+        if (!ready && (files.wav.exists() || files.marks.exists())) {
+            files.wav.delete()
+            files.marks.delete()
+        }
+        return ready
+    }
+
+    private fun isValidWavFile(file: File): Boolean {
+        if (!file.exists() || file.length() <= MIN_HUMAN_READER_WAV_BYTES) return false
+        return ttsEngine.isPlayableRenderedWav(file)
+    }
+
+    private fun isValidMarksFile(file: File): Boolean =
+        file.exists() && file.length() > 0L &&
+            runCatching { ttsEngine.readRenderedMarks(file).isNotEmpty() }.getOrDefault(false)
+
+    private fun commitHumanReaderCache(files: HumanReaderFiles): Boolean {
+        if (!isValidWavFile(files.tempWav) || !isValidMarksFile(files.tempMarks)) return false
+
+        files.wav.parentFile?.mkdirs()
+        files.wav.delete()
+        files.marks.delete()
+
+        val wavMoved = files.tempWav.renameTo(files.wav) || runCatching {
+            files.tempWav.copyTo(files.wav, overwrite = true)
+            files.tempWav.delete()
+            true
+        }.getOrDefault(false)
+        val marksMoved = files.tempMarks.renameTo(files.marks) || runCatching {
+            files.tempMarks.copyTo(files.marks, overwrite = true)
+            files.tempMarks.delete()
+            true
+        }.getOrDefault(false)
+
+        val committed = wavMoved && marksMoved && isHumanReaderCacheReady(files)
+        if (!committed) {
+            files.wav.delete()
+            files.marks.delete()
+        }
+        return committed
+    }
+
+    private fun cleanupHumanReaderTempFiles(bookId: Long, voiceId: String) {
+        val safeVoiceId = voiceId.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+        humanReaderCacheDir(bookId, safeVoiceId)
+            .listFiles { file -> file.name.endsWith(".tmp") }
+            ?.forEach { it.delete() }
+    }
+
+    private fun estimatePendingHumanReaderBytes(
+        bookId: Long,
+        voiceId: String,
+        chapters: List<Int>
+    ): Long = chapters.sumOf { chapterIndex ->
+        if (humanReaderChapterReady(bookId, voiceId, chapterIndex, 0)) {
+            0L
+        } else {
+            estimateHumanReaderAudioBytes(parser.getPlainTextForChapter(chapterIndex))
+        }
+    }
+
+    private fun estimateHumanReaderAudioBytes(text: String): Long {
+        val words = text.trim().split(WHITESPACE).count { it.isNotBlank() }.coerceAtLeast(1)
+        return words * HUMAN_READER_ESTIMATED_BYTES_PER_WORD
+    }
+
+    private fun hasEnoughHumanReaderStorage(estimatedBytes: Long): Boolean {
+        val neededBytes = estimatedBytes + MIN_HUMAN_READER_CACHE_FREE_BYTES
+        return ReaderToMeApp.instance.filesDir.usableSpace > neededBytes
+    }
+
+    private fun humanReaderStorageMessage(estimatedBytes: Long): String {
+        val neededMb = bytesToMb(estimatedBytes + MIN_HUMAN_READER_CACHE_FREE_BYTES)
+        val freeMb = bytesToMb(ReaderToMeApp.instance.filesDir.usableSpace)
+        return "Human Reader needs about ${neededMb} MB free to finish this book. Free space now: ${freeMb} MB."
+    }
+
+    private fun bytesToMb(bytes: Long): Long =
+        (bytes / (1024L * 1024L)).coerceAtLeast(1L)
+
+    private fun startHumanReaderPreparationService(book: Book, voiceId: String) {
+        val ctx = ReaderToMeApp.instance
+        val intent = Intent(ctx, HumanReaderPreparationService::class.java).apply {
+            action = HumanReaderPreparationService.ACTION_START
+            putExtra(HumanReaderPreparationService.EXTRA_BOOK_ID, book.id)
+            putExtra(HumanReaderPreparationService.EXTRA_BOOK_TITLE, book.title)
+            putExtra(HumanReaderPreparationService.EXTRA_VOICE_ID, voiceId)
+        }
+        ctx.startForegroundService(intent)
+    }
+
+    private fun stopHumanReaderPreparationService() {
+        val ctx = ReaderToMeApp.instance
+        val intent = Intent(ctx, HumanReaderPreparationService::class.java).apply {
+            action = HumanReaderPreparationService.ACTION_STOP
+        }
+        ctx.startService(intent)
     }
 
     private fun resolveTtsStartOffset(chapter: Int, text: String): Int {
@@ -836,6 +1322,7 @@ class ReaderViewModel : ViewModel() {
     override fun onCleared() {
         super.onCleared()
         selectionResolveJob?.cancel()
+        humanReaderPrepareJob?.cancel()
         evaluateJavascript = null
         parser.close()
     }
@@ -843,5 +1330,8 @@ class ReaderViewModel : ViewModel() {
     private companion object {
         val WHITESPACE = Regex("\\s+")
         const val MIN_READABLE_CHAPTER_CHARS = 1_000
+        const val MIN_HUMAN_READER_WAV_BYTES = 44L
+        const val MIN_HUMAN_READER_CACHE_FREE_BYTES = 300L * 1024L * 1024L
+        const val HUMAN_READER_ESTIMATED_BYTES_PER_WORD = 24_000L
     }
 }

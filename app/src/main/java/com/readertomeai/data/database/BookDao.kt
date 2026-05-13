@@ -10,16 +10,16 @@ import kotlinx.coroutines.flow.Flow
 interface BookDao {
 
     // Books
-    @Query("SELECT * FROM books ORDER BY lastReadAt DESC")
+    @Query("SELECT * FROM books ORDER BY isFinished ASC, isFavorite DESC, lastReadAt DESC, addedAt DESC")
     fun getAllBooksByRecent(): Flow<List<Book>>
 
-    @Query("SELECT * FROM books ORDER BY title ASC")
+    @Query("SELECT * FROM books ORDER BY isFinished ASC, isFavorite DESC, title COLLATE NOCASE ASC")
     fun getAllBooksByTitle(): Flow<List<Book>>
 
-    @Query("SELECT * FROM books ORDER BY author ASC")
+    @Query("SELECT * FROM books ORDER BY isFinished ASC, isFavorite DESC, author COLLATE NOCASE ASC, title COLLATE NOCASE ASC")
     fun getAllBooksByAuthor(): Flow<List<Book>>
 
-    @Query("SELECT * FROM books ORDER BY addedAt DESC")
+    @Query("SELECT * FROM books ORDER BY isFinished ASC, isFavorite DESC, addedAt DESC")
     fun getAllBooksByAdded(): Flow<List<Book>>
 
     @Query("SELECT * FROM books WHERE id = :bookId")
@@ -28,7 +28,7 @@ interface BookDao {
     @Query("SELECT * FROM books WHERE filePath = :path LIMIT 1")
     suspend fun getBookByPath(path: String): Book?
 
-    @Query("SELECT * FROM books WHERE title LIKE '%' || :query || '%' OR author LIKE '%' || :query || '%'")
+    @Query("SELECT * FROM books WHERE title LIKE '%' || :query || '%' OR author LIKE '%' || :query || '%' ORDER BY isFinished ASC, isFavorite DESC, lastReadAt DESC, title COLLATE NOCASE ASC")
     fun searchBooks(query: String): Flow<List<Book>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -40,8 +40,23 @@ interface BookDao {
     @Delete
     suspend fun deleteBook(book: Book)
 
-    @Query("UPDATE books SET currentChapter = :chapter, currentPosition = :position, overallProgress = :progress, lastReadAt = :timestamp WHERE id = :bookId")
+    @Query("""
+        UPDATE books
+        SET currentChapter = :chapter,
+            currentPosition = :position,
+            overallProgress = :progress,
+            lastReadAt = :timestamp,
+            isFinished = CASE WHEN :progress >= 0.995 THEN 1 ELSE isFinished END,
+            finishedAt = CASE WHEN :progress >= 0.995 AND finishedAt IS NULL THEN :timestamp ELSE finishedAt END
+        WHERE id = :bookId
+    """)
     suspend fun updateReadingProgress(bookId: Long, chapter: Int, position: Float, progress: Float, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE books SET isFavorite = :isFavorite WHERE id = :bookId")
+    suspend fun updateFavorite(bookId: Long, isFavorite: Boolean)
+
+    @Query("UPDATE books SET isFinished = :isFinished, finishedAt = :finishedAt WHERE id = :bookId")
+    suspend fun updateFinished(bookId: Long, isFinished: Boolean, finishedAt: Long?)
 
     // Bookmarks
     @Query("SELECT * FROM bookmarks WHERE bookId = :bookId ORDER BY chapterIndex ASC, position ASC")

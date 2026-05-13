@@ -106,7 +106,24 @@ class BookRepository(
     }
 
     suspend fun updateProgress(bookId: Long, chapter: Int, position: Float, progress: Float) {
-        bookDao.updateReadingProgress(bookId, chapter, position, progress)
+        bookDao.updateReadingProgress(
+            bookId = bookId,
+            chapter = chapter,
+            position = position.coerceIn(0f, 1f),
+            progress = progress.coerceIn(0f, 1f)
+        )
+    }
+
+    suspend fun setFavorite(bookId: Long, isFavorite: Boolean) = withContext(Dispatchers.IO) {
+        bookDao.updateFavorite(bookId, isFavorite)
+    }
+
+    suspend fun setFinished(bookId: Long, isFinished: Boolean) = withContext(Dispatchers.IO) {
+        bookDao.updateFinished(
+            bookId = bookId,
+            isFinished = isFinished,
+            finishedAt = if (isFinished) System.currentTimeMillis() else null
+        )
     }
 
     suspend fun deleteBook(book: Book) = withContext(Dispatchers.IO) {

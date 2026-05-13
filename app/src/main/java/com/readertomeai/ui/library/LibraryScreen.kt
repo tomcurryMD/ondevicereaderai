@@ -11,9 +11,11 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -50,6 +52,8 @@ fun LibraryScreen(
     val importError by viewModel.importError.collectAsState()
     val sortOrder by viewModel.sortOrder.collectAsState()
     val isGridView by viewModel.isGridView.collectAsState()
+    val activeBooks = books.filterNot { it.isFinished }
+    val finishedBooks = books.filter { it.isFinished }
 
     var showSortMenu by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf<Book?>(null) }
@@ -202,12 +206,26 @@ fun LibraryScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    items(books, key = { it.id }) { book ->
+                    items(activeBooks, key = { it.id }) { book ->
                         BookGridItem(
                             book = book,
                             onClick = { onBookClick(book.id) },
-                            onLongClick = { showDeleteDialog = book }
+                            onLongClick = { showDeleteDialog = book },
+                            onFavoriteClick = { viewModel.toggleFavorite(book) }
                         )
+                    }
+                    if (finishedBooks.isNotEmpty()) {
+                        item(span = { GridItemSpan(maxLineSpan) }) {
+                            FinishedBooksDivider()
+                        }
+                        items(finishedBooks, key = { it.id }) { book ->
+                            BookGridItem(
+                                book = book,
+                                onClick = { onBookClick(book.id) },
+                                onLongClick = { showDeleteDialog = book },
+                                onFavoriteClick = { viewModel.toggleFavorite(book) }
+                            )
+                        }
                     }
                 }
             } else {
@@ -215,12 +233,28 @@ fun LibraryScreen(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(books, key = { it.id }) { book ->
+                    items(activeBooks, key = { it.id }) { book ->
                         BookListItem(
                             book = book,
                             onClick = { onBookClick(book.id) },
-                            onDelete = { showDeleteDialog = book }
+                            onDelete = { showDeleteDialog = book },
+                            onFavoriteClick = { viewModel.toggleFavorite(book) },
+                            onFinishedClick = { viewModel.toggleFinished(book) }
                         )
+                    }
+                    if (finishedBooks.isNotEmpty()) {
+                        item {
+                            FinishedBooksDivider()
+                        }
+                        items(finishedBooks, key = { it.id }) { book ->
+                            BookListItem(
+                                book = book,
+                                onClick = { onBookClick(book.id) },
+                                onDelete = { showDeleteDialog = book },
+                                onFavoriteClick = { viewModel.toggleFavorite(book) },
+                                onFinishedClick = { viewModel.toggleFinished(book) }
+                            )
+                        }
                     }
                 }
             }
@@ -292,7 +326,12 @@ fun LibraryScreen(
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun BookGridItem(book: Book, onClick: () -> Unit, onLongClick: () -> Unit) {
+fun BookGridItem(
+    book: Book,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    onFavoriteClick: () -> Unit
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -351,6 +390,24 @@ fun BookGridItem(book: Book, onClick: () -> Unit, onLongClick: () -> Unit) {
                         trackColor = Color.Transparent,
                     )
                 }
+
+                IconButton(
+                    onClick = onFavoriteClick,
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(36.dp)
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.86f),
+                            CircleShape
+                        )
+                ) {
+                    Icon(
+                        if (book.isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+                        contentDescription = if (book.isFavorite) "Remove from favorites" else "Add to favorites",
+                        tint = if (book.isFavorite) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
 
             // Book info
@@ -386,7 +443,15 @@ fun BookGridItem(book: Book, onClick: () -> Unit, onLongClick: () -> Unit) {
 }
 
 @Composable
-fun BookListItem(book: Book, onClick: () -> Unit, onDelete: () -> Unit) {
+fun BookListItem(
+    book: Book,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+    onFavoriteClick: () -> Unit,
+    onFinishedClick: () -> Unit
+) {
+    var showBookMenu by remember { mutableStateOf(false) }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -465,13 +530,94 @@ fun BookListItem(book: Book, onClick: () -> Unit, onDelete: () -> Unit) {
                 }
             }
 
-            IconButton(onClick = onDelete) {
+            IconButton(onClick = onFavoriteClick) {
                 Icon(
-                    Icons.Outlined.MoreVert,
-                    contentDescription = "More",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    if (book.isFavorite) Icons.Filled.Star else Icons.Outlined.Star,
+                    contentDescription = if (book.isFavorite) "Remove from favorites" else "Add to favorites",
+                    tint = if (book.isFavorite) Color(0xFFFFC107) else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+
+            Box {
+                IconButton(onClick = { showBookMenu = true }) {
+                    Icon(
+                        Icons.Outlined.MoreVert,
+                        contentDescription = "More",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                DropdownMenu(
+                    expanded = showBookMenu,
+                    onDismissRequest = { showBookMenu = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text(if (book.isFinished) "Move out of finished" else "Mark finished") },
+                        onClick = {
+                            onFinishedClick()
+                            showBookMenu = false
+                        },
+                        leadingIcon = {
+                            Icon(
+                                if (book.isFinished) Icons.Outlined.Unarchive else Icons.Outlined.DoneAll,
+                                contentDescription = null
+                            )
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remove") },
+                        onClick = {
+                            onDelete()
+                            showBookMenu = false
+                        },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Outlined.Delete,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FinishedBooksDivider(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        DottedLine(modifier = Modifier.weight(1f))
+        Text(
+            "Finished books",
+            modifier = Modifier.padding(horizontal = 12.dp),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        DottedLine(modifier = Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun DottedLine(modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier.height(12.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(18) {
+            Box(
+                modifier = Modifier
+                    .size(3.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.outlineVariant)
+            )
         }
     }
 }

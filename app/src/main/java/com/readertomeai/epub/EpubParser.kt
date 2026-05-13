@@ -9,6 +9,7 @@ import nl.siegmann.epublib.domain.Resource
 import nl.siegmann.epublib.domain.TOCReference
 import nl.siegmann.epublib.epub.EpubReader
 import org.jsoup.Jsoup
+import org.jsoup.nodes.TextNode
 import org.jsoup.safety.Safelist
 import java.io.File
 import java.io.FileInputStream
@@ -190,14 +191,38 @@ class EpubParser(private val context: Context) {
         doc.select("[style]").forEach { el ->
             if (REMOTE_STYLE_URL.containsMatchIn(el.attr("style"))) el.removeAttr("style")
         }
-        removeDeadGenericLinks(doc)
+        removeStandaloneOpenControls(doc)
     }
 
-    private fun removeDeadGenericLinks(doc: org.jsoup.nodes.Document) {
-        doc.select("a:not([href])").forEach { link ->
-            if (link.text().trim().equals("open", ignoreCase = true)) {
-                link.remove()
+    private fun removeStandaloneOpenControls(doc: org.jsoup.nodes.Document) {
+        doc.select("body *").forEach { element ->
+            if (element.text().trim().equals("open", ignoreCase = true)) {
+                element.remove()
             }
+        }
+        doc.body()?.childNodes()?.toList()?.forEach { node ->
+            if (node is TextNode && node.text().trim().equals("open", ignoreCase = true)) {
+                node.remove()
+            }
+        }
+    }
+
+    private fun hasNoUsefulTarget(element: org.jsoup.nodes.Element): Boolean {
+        val href = element.attr("href").trim()
+        val onclick = element.attr("onclick").trim()
+        val deadHref = !element.hasAttr("href") ||
+            href.isEmpty() ||
+            href == "#" ||
+            href.startsWith("javascript:", ignoreCase = true) ||
+            isRemoteReference(href)
+        val deadAction = !element.hasAttr("onclick") ||
+            onclick.isEmpty() ||
+            onclick.startsWith("window.open", ignoreCase = true)
+        return when {
+            element.normalName() == "a" -> deadHref
+            element.normalName() == "button" -> deadAction
+            element.attr("role").equals("button", ignoreCase = true) -> deadHref && deadAction
+            else -> deadHref && deadAction
         }
     }
 
@@ -215,6 +240,7 @@ class EpubParser(private val context: Context) {
     ): String {
         val chapter = getChapterContent(chapterIndex)
             ?: return "<html><body><p>Could not load chapter</p></body></html>"
+        val cleanedBodyHtml = cleanReaderBodyHtml(chapter.htmlContent)
 
         val (bgColor, textColor, linkColor) = when (theme) {
             "dark" -> Triple("#1A1A2E", "#EAEAEA", "#8B8BFF")
@@ -258,6 +284,30 @@ class EpubParser(private val context: Context) {
             <script>
                 // Trusted app-level JavaScript (not from book content)
                 var lastReportedProgress = -1;
+
+                function removeStandaloneOpenControls() {
+                    if (!document.body) return;
+                    document.querySelectorAll('a, button, [role="button"], p, div, span, li').forEach(function(el) {
+                        if (el.textContent && el.textContent.trim().toLowerCase() === 'open') {
+                            el.remove();
+                        }
+                    });
+                    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+                    var textNodes = [];
+                    var node;
+                    while (node = walker.nextNode()) {
+                        if (node.textContent && node.textContent.trim().toLowerCase() === 'open') {
+                            textNodes.push(node);
+                        }
+                    }
+                    textNodes.forEach(function(textNode) {
+                        if (textNode.parentNode) textNode.parentNode.removeChild(textNode);
+                    });
+                }
+
+                document.addEventListener('DOMContentLoaded', removeStandaloneOpenControls);
+                window.addEventListener('load', removeStandaloneOpenControls);
+
                 window.addEventListener('scroll', function() {
                     var scrollTop = window.scrollY;
                     var docHeight = document.documentElement.scrollHeight - window.innerHeight;
@@ -351,9 +401,15 @@ class EpubParser(private val context: Context) {
                 });
             </script>
         </head>
-        <body>${chapter.htmlContent}</body>
+        <body>$cleanedBodyHtml</body>
         </html>
         """.trimIndent()
+    }
+
+    private fun cleanReaderBodyHtml(bodyHtml: String): String {
+        val doc = Jsoup.parseBodyFragment(bodyHtml)
+        removeStandaloneOpenControls(doc)
+        return doc.body().html()
     }
 
     fun getTableOfContents(): List<TocEntry> {

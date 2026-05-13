@@ -78,6 +78,18 @@ class LibraryViewModel : ViewModel() {
         }
     }
 
+    fun toggleFavorite(book: Book) {
+        viewModelScope.launch {
+            repo.setFavorite(book.id, !book.isFavorite)
+        }
+    }
+
+    fun toggleFinished(book: Book) {
+        viewModelScope.launch {
+            repo.setFinished(book.id, !book.isFinished)
+        }
+    }
+
     fun clearError() {
         _importError.value = null
     }

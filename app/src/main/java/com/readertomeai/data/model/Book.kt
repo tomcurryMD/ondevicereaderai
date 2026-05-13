@@ -16,6 +16,9 @@ data class Book(
     val overallProgress: Float = 0f, // 0.0 to 1.0 overall
     val addedAt: Long = System.currentTimeMillis(),
     val lastReadAt: Long = 0,
+    val isFavorite: Boolean = false,
+    val isFinished: Boolean = false,
+    val finishedAt: Long? = null,
     val fileSize: Long = 0,
     val language: String = "en",
     val description: String = "",

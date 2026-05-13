@@ -69,6 +69,23 @@ private data class GeneratedTtsAudio(
     val sampleRate: Int
 )
 
+private data class GeneratedVoiceAudio(
+    val samples: FloatArray,
+    val sampleRate: Int,
+    val speakerId: Int,
+    val peak: Float
+)
+
+private data class Pcm16WavInfo(
+    val sampleRate: Int,
+    val channels: Int,
+    val dataOffset: Long,
+    val dataBytes: Long
+) {
+    val bytesPerFrame: Int = channels * 2
+    val totalFrames: Long = dataBytes / bytesPerFrame
+}
+
 private const val DEFAULT_TTS_SPEED = 0.78f
 private const val TTS_AHEAD_BUFFER_SIZE = 24
 private const val INITIAL_TTS_PREFETCH_ITEMS = 2
@@ -78,10 +95,14 @@ private const val MIN_TTS_FRAGMENT_WORDS = 8
 private const val TARGET_TTS_FRAGMENT_WORDS = 14
 private const val MAX_TTS_FRAGMENT_WORDS = 18
 private const val MAX_TTS_CHUNK_WORDS = MAX_TTS_FRAGMENT_WORDS
-private const val HUMAN_READER_TARGET_WORDS = 55
-private const val HUMAN_READER_MAX_WORDS = 80
+private const val HUMAN_READER_TARGET_WORDS = 12
+private const val HUMAN_READER_MAX_WORDS = 18
+private const val MIN_GENERATED_AUDIO_PEAK = 0.002f
+private const val MIN_RENDERED_WAV_PEAK = 32
+private const val MAX_RENDERED_WAV_PEAK_SCAN_BYTES = 1_000_000L
 private const val BUNDLED_TTS_ASSET_DIR = "bundled_tts"
 private const val TAG = "TtsEngine"
+private val KOKORO_HUMAN_READER_SPEAKER_CANDIDATES = intArrayOf(10, 9, 5, 6, 2, 0, 1, 3, 4, 7, 8)
 
 class TtsEngine(private val context: Context) {
 
@@ -89,6 +110,7 @@ class TtsEngine(private val context: Context) {
     private var audioTrack: AudioTrack? = null
     private var mediaPlayer: MediaPlayer? = null
     private var speakJob: Job? = null
+    private val ttsLock = Any()
     private val bundledDefaultInstallMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val generatorDispatcher = Executors.newSingleThreadExecutor { runnable ->
@@ -417,6 +439,7 @@ class TtsEngine(private val context: Context) {
         val voice = voices.find { it.id == voiceId && it.isDownloaded } ?: return false
 
         return try {
+            stop()
             _state.value = TtsState.LOADING
 
             val voiceDir = File(modelsDir, voice.id)
@@ -447,7 +470,7 @@ class TtsEngine(private val context: Context) {
                         dictDir = findKokoroDictDir(voiceDir)?.absolutePath.orEmpty(),
                         lengthScale = 1.0f / speed
                     ),
-                    numThreads = 4,
+                    numThreads = 1,
                     debug = false
                 )
             }
@@ -458,8 +481,10 @@ class TtsEngine(private val context: Context) {
                 maxNumSentences = 1
             )
 
-            tts?.release()
-            tts = OfflineTts(null, config)
+            synchronized(ttsLock) {
+                tts?.release()
+                tts = OfflineTts(null, config)
+            }
             _currentVoice.value = voice
             _state.value = TtsState.IDLE
             true
@@ -497,7 +522,8 @@ class TtsEngine(private val context: Context) {
             val audioChannel = Channel<GeneratedTtsAudio>(capacity = TTS_AHEAD_BUFFER_SIZE)
 
             try {
-                val currentTts = tts ?: return@launch
+                val currentTts = synchronized(ttsLock) { tts } ?: return@launch
+                val voice = _currentVoice.value
                 val playbackSpeed = speed
                 val utterances = buildUtterances(text, segments)
 
@@ -506,11 +532,14 @@ class TtsEngine(private val context: Context) {
                         for (utterance in utterances) {
                             if (isCancelled || !isActive) break
 
-                            val audio = currentTts.generate(
-                                text = utterance.text,
-                                sid = _currentVoice.value?.speakerId ?: 0,
-                                speed = playbackSpeed
-                            )
+                            val audio = synchronized(ttsLock) {
+                                if (tts !== currentTts) throw CancellationException("TTS voice changed")
+                                currentTts.generate(
+                                    text = utterance.text,
+                                    sid = voice?.speakerId ?: 0,
+                                    speed = playbackSpeed
+                                )
+                            }
 
                             if (isCancelled || !isActive) break
 
@@ -590,7 +619,7 @@ class TtsEngine(private val context: Context) {
         marksFile: File,
         onProgress: (Float) -> Unit
     ): Boolean = withContext(generatorDispatcher) {
-        val currentTts = tts ?: return@withContext false
+        val currentTts = synchronized(ttsLock) { tts } ?: return@withContext false
         val voice = _currentVoice.value ?: return@withContext false
         val segments = splitIntoHumanReaderSegments(text)
         val utterances = buildUtterances(text, segments)
@@ -602,6 +631,7 @@ class TtsEngine(private val context: Context) {
         val marks = mutableListOf<RenderedTtsMark>()
         var sampleRate = 24_000
         var totalSamples = 0L
+        var resolvedSpeakerId = voice.speakerId
 
         try {
             FileOutputStream(wavFile).use { output ->
@@ -609,11 +639,24 @@ class TtsEngine(private val context: Context) {
 
                 utterances.forEachIndexed { index, utterance ->
                     ensureActive()
-                    val audio = currentTts.generate(
-                        text = utterance.text,
-                        sid = voice.speakerId,
-                        speed = speed
-                    )
+                    val playbackSpeed = speed
+                    val audio = synchronized(ttsLock) {
+                        if (tts !== currentTts) throw CancellationException("TTS voice changed")
+                        generateAudibleVoiceAudio(
+                            currentTts = currentTts,
+                            voice = voice,
+                            text = utterance.text,
+                            preferredSpeakerId = resolvedSpeakerId,
+                            speed = playbackSpeed
+                        )
+                    } ?: throw IOException("Human Reader generated silent audio for all speaker candidates")
+                    if (audio.speakerId != resolvedSpeakerId) {
+                        Log.w(
+                            TAG,
+                            "Human Reader speaker $resolvedSpeakerId rendered silence; using speaker ${audio.speakerId}"
+                        )
+                        resolvedSpeakerId = audio.speakerId
+                    }
                     sampleRate = audio.sampleRate
 
                     val startMs = samplesToMs(totalSamples, sampleRate)
@@ -644,8 +687,12 @@ class TtsEngine(private val context: Context) {
             patchWavHeader(wavFile, sampleRate, totalSamples)
             writeMarks(marksFile, marks)
             true
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (e: CancellationException) {
+            wavFile.delete()
+            marksFile.delete()
+            throw e
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to render prepared Human Reader audio", e)
             wavFile.delete()
             marksFile.delete()
             false
@@ -655,12 +702,168 @@ class TtsEngine(private val context: Context) {
     fun playRenderedChapter(
         wavFile: File,
         marks: List<RenderedTtsMark>,
+        startMs: Long = 0L,
         onSentenceStart: ((sentenceIndex: Int, startChar: Int, endChar: Int) -> Unit)? = null,
         onComplete: (() -> Unit)? = null
     ) {
         stop()
         if (!wavFile.exists()) return
 
+        val wavInfo = readPcm16WavInfo(wavFile)
+        if (wavInfo == null) {
+            playRenderedChapterWithMediaPlayer(wavFile, marks, startMs, onSentenceStart, onComplete)
+            return
+        }
+        Log.d(
+            TAG,
+            "Playing prepared Human Reader audio via AudioTrack: ${wavFile.name}, " +
+                "${wavInfo.sampleRate} Hz, ${wavInfo.channels} channel(s), ${wavInfo.dataBytes} bytes, startMs=$startMs"
+        )
+
+        val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
+        if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return
+
+        val startFrame = (startMs.coerceAtLeast(0L) * wavInfo.sampleRate / 1000L)
+            .coerceAtMost(wavInfo.totalFrames)
+        val framesToPlay = wavInfo.totalFrames - startFrame
+        if (framesToPlay <= 0L) {
+            audioManager.abandonAudioFocusRequest(audioFocusRequest)
+            _state.value = TtsState.IDLE
+            onComplete?.invoke()
+            return
+        }
+
+        isPaused = false
+        isCancelled = false
+        _state.value = TtsState.SPEAKING
+
+        speakJob = scope.launch {
+            var writerJob: Job? = null
+            var lastMarkIndex = -1
+            val writerFinished = AtomicBoolean(false)
+            val channelMask = if (wavInfo.channels == 1) {
+                AudioFormat.CHANNEL_OUT_MONO
+            } else {
+                AudioFormat.CHANNEL_OUT_STEREO
+            }
+            val minBufferSize = AudioTrack.getMinBufferSize(
+                wavInfo.sampleRate,
+                channelMask,
+                AudioFormat.ENCODING_PCM_16BIT
+            ).takeIf { it > 0 } ?: (wavInfo.sampleRate * wavInfo.bytesPerFrame / 4)
+            val bufferSize = maxOf(minBufferSize * 2, 32 * 1024)
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(wavInfo.sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(channelMask)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+
+            try {
+                audioTrack = track
+                track.play()
+
+                writerJob = launch(Dispatchers.IO) {
+                    var remainingBytes = framesToPlay * wavInfo.bytesPerFrame
+                    val startByte = wavInfo.dataOffset + startFrame * wavInfo.bytesPerFrame
+                    val buffer = ByteArray(minOf(64 * 1024L, remainingBytes).coerceAtLeast(wavInfo.bytesPerFrame.toLong()).toInt())
+                    FileInputStream(wavFile).use { input ->
+                        input.skipFully(startByte)
+                        while (isActive && !isCancelled && remainingBytes > 0L) {
+                            val readSize = minOf(buffer.size.toLong(), remainingBytes).toInt()
+                            val read = input.read(buffer, 0, readSize)
+                            if (read <= 0) break
+
+                            var written = 0
+                            while (isActive && !isCancelled && written < read) {
+                                val result = track.write(buffer, written, read - written, AudioTrack.WRITE_BLOCKING)
+                                if (result < 0) {
+                                    throw IOException("AudioTrack write failed: $result")
+                                }
+                                if (result == 0) {
+                                    delay(5)
+                                } else {
+                                    written += result
+                                    remainingBytes -= result
+                                }
+                            }
+                        }
+                    }
+                    writerFinished.set(true)
+                }
+
+                while (!isCancelled && isActive) {
+                    if (isPaused) {
+                        if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                            track.pause()
+                        }
+                    } else if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                        track.play()
+                    }
+
+                    val playedFrames = track.playbackHeadPosition.toLong()
+                    val positionMs = startMs.coerceAtLeast(0L) + samplesToMs(playedFrames, wavInfo.sampleRate)
+                    val mark = marks.lastOrNull { it.startMs <= positionMs }
+                    if (mark != null && mark.index != lastMarkIndex) {
+                        lastMarkIndex = mark.index
+                        _progress.value = TtsSpeakingProgress(
+                            sentenceIndex = mark.index,
+                            totalSentences = marks.size,
+                            currentSentenceStart = mark.startChar,
+                            currentSentenceEnd = mark.endChar
+                        )
+                        withContext(Dispatchers.Main) {
+                            onSentenceStart?.invoke(mark.index, mark.startChar, mark.endChar)
+                        }
+                    }
+
+                    if (writerFinished.get() && playedFrames >= framesToPlay) break
+                    delay(50)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to play prepared Human Reader audio through AudioTrack", e)
+            } finally {
+                writerJob?.cancelAndJoin()
+                try {
+                    track.pause()
+                    track.flush()
+                    track.stop()
+                } catch (_: Exception) {}
+                try {
+                    track.release()
+                } catch (_: Exception) {}
+                audioTrack = null
+                audioManager.abandonAudioFocusRequest(audioFocusRequest)
+                withContext(Dispatchers.Main) {
+                    if (!isCancelled) {
+                        _state.value = TtsState.IDLE
+                        onComplete?.invoke()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun playRenderedChapterWithMediaPlayer(
+        wavFile: File,
+        marks: List<RenderedTtsMark>,
+        startMs: Long = 0L,
+        onSentenceStart: ((sentenceIndex: Int, startChar: Int, endChar: Int) -> Unit)? = null,
+        onComplete: (() -> Unit)? = null
+    ) {
         val focusResult = audioManager.requestAudioFocus(audioFocusRequest)
         if (focusResult != AudioManager.AUDIOFOCUS_REQUEST_GRANTED) return
 
@@ -679,6 +882,9 @@ class TtsEngine(private val context: Context) {
             setDataSource(wavFile.absolutePath)
             setOnCompletionListener { completed.set(true) }
             prepare()
+            if (startMs > 0L) {
+                seekTo(startMs.toInt())
+            }
             start()
         }
         mediaPlayer = player
@@ -732,6 +938,17 @@ class TtsEngine(private val context: Context) {
                 endMs = parts[4].toLongOrNull() ?: return@mapNotNull null
             )
         }
+    }
+
+    fun isPlayableRenderedWav(wavFile: File): Boolean {
+        if (!wavFile.exists() || wavFile.length() < 44L) return false
+        val wavInfo = readPcm16WavInfo(wavFile) ?: return false
+        val peak = readPcm16Peak(wavFile, wavInfo)
+        val playable = peak >= MIN_RENDERED_WAV_PEAK
+        if (!playable) {
+            Log.w(TAG, "Prepared Human Reader WAV is silent or invalid: ${wavFile.name}, peak=$peak")
+        }
+        return playable
     }
 
     private fun buildUtterances(text: String, segments: List<TtsTextSegment>): List<TtsUtterance> {
@@ -883,8 +1100,10 @@ class TtsEngine(private val context: Context) {
 
     fun release() {
         stop()
-        tts?.release()
-        tts = null
+        synchronized(ttsLock) {
+            tts?.release()
+            tts = null
+        }
         generatorDispatcher.close()
         scope.cancel()
     }
@@ -921,17 +1140,9 @@ class TtsEngine(private val context: Context) {
             .ifEmpty { listOf(text.trim()) }
 
         val segments = mutableListOf<TtsTextSegment>()
-        var pending = ""
         sentences.forEach { sentence ->
-            val candidate = if (pending.isBlank()) sentence else "$pending $sentence"
-            if (wordCount(candidate) <= HUMAN_READER_TARGET_WORDS) {
-                pending = candidate
-            } else {
-                if (pending.isNotBlank()) addHumanReaderFragment(pending, segments)
-                pending = sentence
-            }
+            addHumanReaderFragment(sentence, segments)
         }
-        if (pending.isNotBlank()) addHumanReaderFragment(pending, segments)
         return segments
     }
 
@@ -1072,6 +1283,144 @@ class TtsEngine(private val context: Context) {
     private fun samplesToMs(samples: Long, sampleRate: Int): Long =
         if (sampleRate <= 0) 0 else samples * 1000L / sampleRate
 
+    private fun readPcm16WavInfo(file: File): Pcm16WavInfo? {
+        if (!file.exists() || file.length() < 44L) return null
+        return runCatching {
+            RandomAccessFile(file, "r").use { raf ->
+                if (raf.readAscii(4) != "RIFF") return@use null
+                raf.readUnsignedIntLe()
+                if (raf.readAscii(4) != "WAVE") return@use null
+
+                var audioFormat = -1
+                var channels = -1
+                var sampleRate = -1
+                var bitsPerSample = -1
+                var dataOffset = -1L
+                var dataBytes = -1L
+
+                while (raf.filePointer + 8L <= raf.length()) {
+                    val chunkId = raf.readAscii(4)
+                    val chunkSize = raf.readUnsignedIntLe()
+                    val chunkStart = raf.filePointer
+                    val nextChunk = (chunkStart + chunkSize + (chunkSize and 1L)).coerceAtMost(raf.length())
+
+                    when (chunkId) {
+                        "fmt " -> {
+                            if (chunkSize >= 16L) {
+                                audioFormat = raf.readUnsignedShortLe()
+                                channels = raf.readUnsignedShortLe()
+                                sampleRate = raf.readUnsignedIntLe().toInt()
+                                raf.readUnsignedIntLe()
+                                raf.readUnsignedShortLe()
+                                bitsPerSample = raf.readUnsignedShortLe()
+                            }
+                        }
+                        "data" -> {
+                            dataOffset = chunkStart
+                            dataBytes = chunkSize.coerceAtMost(raf.length() - chunkStart)
+                        }
+                    }
+
+                    if (dataOffset >= 0L && audioFormat >= 0) break
+                    raf.seek(nextChunk)
+                }
+
+                if (
+                    audioFormat == 1 &&
+                    channels in 1..2 &&
+                    sampleRate > 0 &&
+                    bitsPerSample == 16 &&
+                    dataOffset >= 0L &&
+                    dataBytes > 0L
+                ) {
+                    Pcm16WavInfo(
+                        sampleRate = sampleRate,
+                        channels = channels,
+                        dataOffset = dataOffset,
+                        dataBytes = dataBytes
+                    )
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
+    }
+
+    private fun readPcm16Peak(file: File, wavInfo: Pcm16WavInfo): Int {
+        return runCatching {
+            FileInputStream(file).use { input ->
+                input.skipFully(wavInfo.dataOffset)
+                var remaining = minOf(wavInfo.dataBytes, MAX_RENDERED_WAV_PEAK_SCAN_BYTES)
+                val buffer = ByteArray(minOf(32 * 1024L, remaining).coerceAtLeast(wavInfo.bytesPerFrame.toLong()).toInt())
+                var peak = 0
+
+                while (remaining > 1L && peak < MIN_RENDERED_WAV_PEAK) {
+                    val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+                    if (read <= 1) break
+                    var index = 0
+                    while (index + 1 < read) {
+                        val sample = ((buffer[index].toInt() and 0xff) or (buffer[index + 1].toInt() shl 8)).toShort().toInt()
+                        val magnitude = if (sample < 0) -sample else sample
+                        if (magnitude > peak) peak = magnitude
+                        index += 2
+                    }
+                    remaining -= read
+                }
+
+                peak
+            }
+        }.getOrDefault(0)
+    }
+
+    private fun generateAudibleVoiceAudio(
+        currentTts: OfflineTts,
+        voice: VoiceModel,
+        text: String,
+        preferredSpeakerId: Int,
+        speed: Float
+    ): GeneratedVoiceAudio? {
+        var best: GeneratedVoiceAudio? = null
+
+        for (speakerId in speakerCandidatesFor(voice, preferredSpeakerId)) {
+            val audio = currentTts.generate(
+                text = text,
+                sid = speakerId,
+                speed = speed
+            )
+            val peak = floatPeak(audio.samples)
+            val result = GeneratedVoiceAudio(
+                samples = audio.samples,
+                sampleRate = audio.sampleRate,
+                speakerId = speakerId,
+                peak = peak
+            )
+            if (best == null || peak > best.peak) {
+                best = result
+            }
+            if (peak >= MIN_GENERATED_AUDIO_PEAK) {
+                return result
+            }
+        }
+
+        return best?.takeIf { it.peak > 0f }
+    }
+
+    private fun speakerCandidatesFor(voice: VoiceModel, preferredSpeakerId: Int): IntArray {
+        if (voice.engine != VoiceEngine.KOKORO) return intArrayOf(preferredSpeakerId)
+        return (intArrayOf(preferredSpeakerId) + KOKORO_HUMAN_READER_SPEAKER_CANDIDATES)
+            .distinct()
+            .toIntArray()
+    }
+
+    private fun floatPeak(samples: FloatArray): Float {
+        var peak = 0f
+        samples.forEach { sample ->
+            val magnitude = kotlin.math.abs(sample)
+            if (magnitude > peak) peak = magnitude
+        }
+        return peak
+    }
+
     private fun writePcm16Samples(output: OutputStream, samples: FloatArray) {
         val buffer = ByteArray(samples.size * 2)
         var offset = 0
@@ -1141,5 +1490,46 @@ class TtsEngine(private val context: Context) {
             ((value shr 16) and 0xff).toByte(),
             ((value shr 24) and 0xff).toByte()
         )
+
+    private fun InputStream.skipFully(bytes: Long) {
+        var remaining = bytes
+        while (remaining > 0L) {
+            val skipped = skip(remaining)
+            if (skipped > 0L) {
+                remaining -= skipped
+            } else if (read() >= 0) {
+                remaining--
+            } else {
+                throw EOFException("Could not skip to WAV audio data")
+            }
+        }
+    }
+
+    private fun RandomAccessFile.readAscii(length: Int): String {
+        val bytes = ByteArray(length)
+        readFully(bytes)
+        return bytes.toString(Charsets.US_ASCII)
+    }
+
+    private fun RandomAccessFile.readUnsignedShortLe(): Int {
+        val b0 = read()
+        val b1 = read()
+        if (b0 < 0 || b1 < 0) throw EOFException()
+        return (b0 and 0xff) or ((b1 and 0xff) shl 8)
+    }
+
+    private fun RandomAccessFile.readUnsignedIntLe(): Long {
+        val b0 = read()
+        val b1 = read()
+        val b2 = read()
+        val b3 = read()
+        if (b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0) throw EOFException()
+        return (
+            (b0 and 0xff).toLong() or
+                ((b1 and 0xff).toLong() shl 8) or
+                ((b2 and 0xff).toLong() shl 16) or
+                ((b3 and 0xff).toLong() shl 24)
+        )
+    }
 
 }

@@ -61,6 +61,7 @@ class ReaderToMeApp : Application() {
     companion object {
         const val NOTIFICATION_CHANNEL_ID = "tts_playback"
         const val NOTIFICATION_ID = 1001
+        const val HUMAN_READER_NOTIFICATION_ID = 1002
 
         lateinit var instance: ReaderToMeApp
             private set

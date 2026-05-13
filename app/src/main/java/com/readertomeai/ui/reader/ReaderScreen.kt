@@ -1,6 +1,11 @@
 package com.readertomeai.ui.reader
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -27,12 +32,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.readertomeai.data.model.ReaderMode
 import com.readertomeai.tts.TtsState
 import com.readertomeai.ui.theme.*
 import java.io.ByteArrayInputStream
@@ -93,6 +103,7 @@ fun ReaderScreen(
         "sepia" -> SepiaReadingColors.background
         else -> LightReadingColors.background
     }
+    ReaderSystemBars(showBars = uiState.showControls)
 
     Box(modifier = Modifier.fillMaxSize().background(readingBg)) {
         // WebView Reader
@@ -109,23 +120,6 @@ fun ReaderScreen(
                 viewModel.evaluateJavascript = jsEvaluator
             }
         )
-
-        AnimatedVisibility(
-            visible = !uiState.showControls,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 16.dp, top = 48.dp)
-        ) {
-            SmallFloatingActionButton(
-                onClick = onBack,
-                containerColor = readingBg.copy(alpha = 0.95f),
-                contentColor = MaterialTheme.colorScheme.onSurface
-            ) {
-                Icon(Icons.Filled.Home, "Back to Library")
-            }
-        }
 
         AnimatedVisibility(
             visible = !uiState.showControls && uiState.ttsStatusMessage != null,
@@ -204,6 +198,15 @@ fun ReaderScreen(
             exit = fadeOut() + slideOutVertically(targetOffsetY = { it }),
             modifier = Modifier.align(Alignment.BottomCenter)
         ) {
+            val activeHumanProgress = uiState.humanReaderStatuses.values
+                .firstOrNull { it.label == "Preparing" }
+                ?.progress ?: 0f
+            val humanReaderProgress = if (uiState.humanReaderRequiredChapters.isNotEmpty()) {
+                ((uiState.humanReaderReadyCount + activeHumanProgress) / uiState.humanReaderRequiredChapters.size)
+                    .coerceIn(0f, 1f)
+            } else {
+                0f
+            }
             TtsControlBar(
                 ttsState = ttsState,
                 currentChapter = uiState.currentChapter,
@@ -211,6 +214,16 @@ fun ReaderScreen(
                 chapterTitle = uiState.chapterTitle,
                 statusMessage = uiState.ttsStatusMessage,
                 downloadProgress = ttsDownloadProgress,
+                readerMode = uiState.readerMode,
+                humanReaderStatus = uiState.humanReaderStatuses[uiState.currentChapter],
+                humanReaderReadyCount = uiState.humanReaderReadyCount,
+                humanReaderRequiredCount = uiState.humanReaderRequiredChapters.size,
+                isHumanReaderPlayable = uiState.humanReaderPlayableChapter != null,
+                humanReaderProgress = humanReaderProgress,
+                isHumanReaderPreparing = uiState.isHumanReaderPreparing,
+                onReaderModeChange = { viewModel.setReaderMode(it) },
+                onDownloadHumanReader = { viewModel.downloadHumanReaderBook() },
+                onCancelHumanReader = { viewModel.cancelHumanReaderPreparation() },
                 onPlay = { viewModel.playTts() },
                 onPause = { viewModel.pauseTts() },
                 onResume = { viewModel.resumeTts() },
@@ -226,7 +239,16 @@ fun ReaderScreen(
             TocDrawer(
                 toc = uiState.tableOfContents,
                 currentChapter = uiState.currentChapter,
+                totalChapters = uiState.totalChapters,
                 humanReaderStatuses = uiState.humanReaderStatuses,
+                humanReaderReadyCount = uiState.humanReaderReadyCount,
+                humanReaderRequiredCount = uiState.humanReaderRequiredChapters.size,
+                readerMode = uiState.readerMode,
+                isHumanReaderPreparing = uiState.isHumanReaderPreparing,
+                onPrepareCurrent = { viewModel.prepareCurrentHumanReaderChapter() },
+                onPrepareNext = { viewModel.prepareNextHumanReaderChapters() },
+                onPrepareAll = { viewModel.prepareAllHumanReaderChapters() },
+                onCancelPreparation = { viewModel.cancelHumanReaderPreparation() },
                 onChapterSelect = {
                     viewModel.goToChapter(it)
                     viewModel.hideToc()
@@ -265,6 +287,37 @@ fun ReaderScreen(
     }
 }
 
+@Composable
+private fun ReaderSystemBars(showBars: Boolean) {
+    val context = LocalContext.current
+    val view = LocalView.current
+    val activity = remember(context) { context.findActivity() }
+
+    DisposableEffect(activity, view, showBars) {
+        val controller = activity?.window?.let { window ->
+            WindowCompat.getInsetsController(window, view)
+        }
+        controller?.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+        if (showBars) {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        } else {
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        }
+
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 /**
  * WebView-based reader.
  *
@@ -274,7 +327,7 @@ fun ReaderScreen(
  * - JS bridge methods validate inputs
  * - Blocks all external navigation
  */
-@SuppressLint("SetJavaScriptEnabled")
+@SuppressLint("SetJavaScriptEnabled", "ClickableViewAccessibility")
 @Composable
 fun ReaderWebView(
     html: String,
@@ -288,6 +341,15 @@ fun ReaderWebView(
 
     AndroidView(
         factory = { ctx ->
+            val tapDetector = GestureDetector(
+                ctx,
+                object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                        onTap()
+                        return false
+                    }
+                }
+            )
             WebView(ctx).apply {
                 // Expose JS evaluator to caller (for TTS highlighting)
                 onWebViewReady?.invoke { js ->
@@ -348,6 +410,11 @@ fun ReaderWebView(
                         )
                     }
                 }, "Android")
+
+                setOnTouchListener { _, event ->
+                    tapDetector.onTouchEvent(event)
+                    false
+                }
             }
         },
         update = { webView ->
@@ -371,6 +438,16 @@ fun TtsControlBar(
     chapterTitle: String,
     statusMessage: String?,
     downloadProgress: Float?,
+    readerMode: ReaderMode,
+    humanReaderStatus: HumanReaderChapterStatus?,
+    humanReaderReadyCount: Int,
+    humanReaderRequiredCount: Int,
+    isHumanReaderPlayable: Boolean,
+    humanReaderProgress: Float,
+    isHumanReaderPreparing: Boolean,
+    onReaderModeChange: (ReaderMode) -> Unit,
+    onDownloadHumanReader: () -> Unit,
+    onCancelHumanReader: () -> Unit,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
@@ -385,15 +462,25 @@ fun TtsControlBar(
         shadowElevation = 8.dp
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            ReaderModeToggle(
+                readerMode = readerMode,
+                onReaderModeChange = onReaderModeChange
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Ch. ${currentChapter + 1} of $totalChapters",
+                    readerChapterLabel(chapterTitle, currentChapter),
+                    modifier = Modifier.widthIn(max = 140.dp),
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 LinearProgressIndicator(
                     progress = { if (totalChapters > 0) (currentChapter + 1f) / totalChapters else 0f },
@@ -403,6 +490,16 @@ fun TtsControlBar(
                         .height(3.dp)
                         .clip(RoundedCornerShape(2.dp)),
                     color = Purple,
+                )
+            }
+
+            if (readerMode == ReaderMode.HUMAN) {
+                Spacer(modifier = Modifier.height(8.dp))
+                HumanReaderStatusRow(
+                    status = humanReaderStatus,
+                    readyCount = humanReaderReadyCount,
+                    requiredCount = humanReaderRequiredCount,
+                    progress = humanReaderProgress
                 )
             }
 
@@ -418,34 +515,90 @@ fun TtsControlBar(
                 }
                 Spacer(modifier = Modifier.width(16.dp))
 
-                when (ttsState) {
-                    TtsState.IDLE, TtsState.LOADING -> {
-                        FloatingActionButton(
-                            onClick = onPlay,
-                            containerColor = Purple,
-                            contentColor = Color.White,
-                            modifier = Modifier.size(56.dp)
-                        ) {
-                            if (ttsState == TtsState.LOADING) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp
-                                )
-                            } else {
-                                Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(32.dp))
-                            }
+                if (readerMode == ReaderMode.HUMAN) {
+                    val humanReaderComplete = humanReaderRequiredCount > 0 &&
+                        humanReaderReadyCount >= humanReaderRequiredCount
+
+                    SmallFloatingActionButton(
+                        onClick = if (isHumanReaderPreparing) onCancelHumanReader else onDownloadHumanReader,
+                        containerColor = if (humanReaderComplete) MaterialTheme.colorScheme.secondaryContainer else Purple,
+                        contentColor = if (humanReaderComplete) MaterialTheme.colorScheme.onSecondaryContainer else Color.White,
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        when {
+                            isHumanReaderPreparing -> CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                color = Color.White,
+                                strokeWidth = 2.dp
+                            )
+                            humanReaderComplete -> Icon(Icons.Filled.CheckCircle, "Human Reader downloaded", modifier = Modifier.size(24.dp))
+                            else -> Icon(Icons.Filled.Download, "Download Human Reader", modifier = Modifier.size(24.dp))
                         }
                     }
-                    TtsState.SPEAKING -> {
-                        FloatingActionButton(
-                            onClick = onPause, containerColor = Purple, contentColor = Color.White,
-                            modifier = Modifier.size(56.dp)
-                        ) { Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(32.dp)) }
+
+                    Spacer(modifier = Modifier.width(12.dp))
+
+                    when (ttsState) {
+                        TtsState.IDLE, TtsState.LOADING -> {
+                            val canPlay = isHumanReaderPlayable || humanReaderComplete
+                            FloatingActionButton(
+                                onClick = { if (canPlay) onPlay() },
+                                containerColor = if (canPlay) Purple else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (canPlay) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                if (ttsState == TtsState.LOADING) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(32.dp))
+                                }
+                            }
+                        }
+                        TtsState.SPEAKING -> {
+                            FloatingActionButton(
+                                onClick = onPause, containerColor = Purple, contentColor = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            ) { Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(32.dp)) }
+                        }
+                        TtsState.PAUSED -> {
+                            FloatingActionButton(
+                                onClick = onResume, containerColor = Purple, contentColor = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            ) { Icon(Icons.Filled.PlayArrow, "Resume", modifier = Modifier.size(32.dp)) }
+                        }
                     }
-                    TtsState.PAUSED -> {
-                        FloatingActionButton(
-                            onClick = onResume, containerColor = Purple, contentColor = Color.White,
-                            modifier = Modifier.size(56.dp)
-                        ) { Icon(Icons.Filled.PlayArrow, "Resume", modifier = Modifier.size(32.dp)) }
+                } else {
+                    when (ttsState) {
+                        TtsState.IDLE, TtsState.LOADING -> {
+                            FloatingActionButton(
+                                onClick = onPlay,
+                                containerColor = Purple,
+                                contentColor = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            ) {
+                                if (ttsState == TtsState.LOADING) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(Icons.Filled.PlayArrow, "Play", modifier = Modifier.size(32.dp))
+                                }
+                            }
+                        }
+                        TtsState.SPEAKING -> {
+                            FloatingActionButton(
+                                onClick = onPause, containerColor = Purple, contentColor = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            ) { Icon(Icons.Filled.Pause, "Pause", modifier = Modifier.size(32.dp)) }
+                        }
+                        TtsState.PAUSED -> {
+                            FloatingActionButton(
+                                onClick = onResume, containerColor = Purple, contentColor = Color.White,
+                                modifier = Modifier.size(56.dp)
+                            ) { Icon(Icons.Filled.PlayArrow, "Resume", modifier = Modifier.size(32.dp)) }
+                        }
                     }
                 }
 
@@ -481,7 +634,136 @@ fun TtsControlBar(
                     )
                 }
             }
+
+            if (readerMode == ReaderMode.HUMAN && humanReaderRequiredCount > 0 && humanReaderReadyCount < humanReaderRequiredCount) {
+                Spacer(modifier = Modifier.height(10.dp))
+                LinearProgressIndicator(
+                    progress = { humanReaderProgress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = Purple,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun ReaderModeToggle(
+    readerMode: ReaderMode,
+    onReaderModeChange: (ReaderMode) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        ReaderModeChip(
+            selected = readerMode == ReaderMode.INSTANT,
+            onClick = { onReaderModeChange(ReaderMode.INSTANT) },
+            label = "Instant Reader",
+            icon = { Icon(Icons.Filled.Bolt, null, modifier = Modifier.size(16.dp)) },
+            modifier = Modifier.weight(1f)
+        )
+        ReaderModeChip(
+            selected = readerMode == ReaderMode.HUMAN,
+            onClick = { onReaderModeChange(ReaderMode.HUMAN) },
+            label = "Human Reader",
+            icon = { Icon(Icons.Filled.RecordVoiceOver, null, modifier = Modifier.size(16.dp)) },
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+private fun ReaderModeChip(
+    selected: Boolean,
+    onClick: () -> Unit,
+    label: String,
+    icon: @Composable () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = {
+            Text(
+                label,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium
+            )
+        },
+        leadingIcon = {
+            if (selected) {
+                Icon(Icons.Filled.CheckBox, null, modifier = Modifier.size(16.dp))
+            } else {
+                icon()
+            }
+        },
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = Purple,
+            selectedLabelColor = Color.White,
+            selectedLeadingIconColor = Color.White
+        ),
+        modifier = modifier
+    )
+}
+
+@Composable
+private fun HumanReaderStatusRow(
+    status: HumanReaderChapterStatus?,
+    readyCount: Int,
+    requiredCount: Int,
+    progress: Float
+) {
+    val icon = when (status?.label) {
+        "Ready", "Ready from here" -> Icons.Filled.CheckCircle
+        "Failed" -> Icons.Filled.Error
+        "Queued" -> Icons.Filled.Schedule
+        "Preparing" -> Icons.Filled.GraphicEq
+        else -> Icons.Filled.Info
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = if (status?.label == "Failed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp)
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            if (requiredCount > 0 && readyCount >= requiredCount) {
+                "Human Reader: ready"
+            } else {
+                "Human Reader: $readyCount/$requiredCount ready (${(progress * 100).toInt()}%)"
+            },
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private fun humanReaderStatusLabel(status: HumanReaderChapterStatus?): String {
+    val progress = status?.progress
+    return when {
+        status == null -> "not ready"
+        progress != null -> "${status.label} ${(progress * 100).toInt()}%"
+        status.label == "Ready from here" -> "ready from here"
+        else -> status.label.lowercase()
+    }
+}
+
+private fun readerChapterLabel(chapterTitle: String, currentChapter: Int): String {
+    val title = chapterTitle.trim()
+    return when {
+        title.isBlank() -> "Section ${currentChapter + 1}"
+        title.matches(Regex("""\d+""")) -> "Chapter $title"
+        else -> title
     }
 }
 
@@ -489,7 +771,16 @@ fun TtsControlBar(
 fun TocDrawer(
     toc: List<com.readertomeai.data.model.TocEntry>,
     currentChapter: Int,
+    totalChapters: Int,
     humanReaderStatuses: Map<Int, HumanReaderChapterStatus>,
+    humanReaderReadyCount: Int,
+    humanReaderRequiredCount: Int,
+    readerMode: ReaderMode,
+    isHumanReaderPreparing: Boolean,
+    onPrepareCurrent: () -> Unit,
+    onPrepareNext: () -> Unit,
+    onPrepareAll: () -> Unit,
+    onCancelPreparation: () -> Unit,
     onChapterSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -498,6 +789,22 @@ fun TocDrawer(
         title = { Text("Table of Contents", fontWeight = FontWeight.Bold) },
         text = {
             LazyColumn {
+                if (readerMode == ReaderMode.HUMAN) {
+                    item {
+                        HumanReaderPrepPanel(
+                            totalChapters = humanReaderRequiredCount,
+                            readyCount = humanReaderReadyCount,
+                            isPreparing = isHumanReaderPreparing,
+                            onPrepareCurrent = onPrepareCurrent,
+                            onPrepareNext = onPrepareNext,
+                            onPrepareAll = onPrepareAll,
+                            onCancelPreparation = onCancelPreparation
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        HorizontalDivider(modifier = Modifier.padding(horizontal = 8.dp))
+                    }
+                }
+
                 items(toc) { entry ->
                     Row(
                         modifier = Modifier
@@ -510,24 +817,22 @@ fun TocDrawer(
                             Box(modifier = Modifier.size(8.dp).clip(CircleShape).background(Purple))
                             Spacer(modifier = Modifier.width(12.dp))
                         }
-                        Column(modifier = Modifier.padding(start = if (entry.chapterIndex != currentChapter) 20.dp else 0.dp)) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(start = if (entry.chapterIndex != currentChapter) 20.dp else 0.dp)
+                        ) {
                             Text(
                                 entry.title,
                                 fontWeight = if (entry.chapterIndex == currentChapter) FontWeight.Bold else FontWeight.Normal,
-                                color = if (entry.chapterIndex == currentChapter) Purple else MaterialTheme.colorScheme.onSurface
+                                color = if (entry.chapterIndex == currentChapter) Purple else MaterialTheme.colorScheme.onSurface,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
                             )
-                            humanReaderStatuses[entry.chapterIndex]?.let { status ->
-                                val progress = status.progress
-                                Text(
-                                    if (progress != null) {
-                                        "Human Reader: ${status.label} ${(progress * 100).toInt()}%"
-                                    } else {
-                                        "Human Reader: ${status.label}"
-                                    },
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                        }
+                        humanReaderStatuses[entry.chapterIndex]?.let { status ->
+                            Spacer(modifier = Modifier.width(8.dp))
+                            HumanReaderStatusChip(status = status)
                         }
                     }
                     if (entry != toc.last()) {
@@ -538,6 +843,107 @@ fun TocDrawer(
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
+}
+
+@Composable
+private fun HumanReaderPrepPanel(
+    totalChapters: Int,
+    readyCount: Int,
+    isPreparing: Boolean,
+    onPrepareCurrent: () -> Unit,
+    onPrepareNext: () -> Unit,
+    onPrepareAll: () -> Unit,
+    onCancelPreparation: () -> Unit
+) {
+    val progress = if (totalChapters > 0) readyCount.toFloat() / totalChapters else 0f
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Human Reader", fontWeight = FontWeight.Bold)
+                Text(
+                    "$readyCount/$totalChapters ready",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp, bottom = 12.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = Purple
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton(
+                    onClick = onPrepareAll,
+                    enabled = !isPreparing,
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                ) {
+                    Icon(Icons.Filled.Download, null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Download Book", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (isPreparing) {
+                    OutlinedButton(
+                        onClick = onCancelPreparation,
+                        modifier = Modifier.weight(1f),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Filled.Cancel, null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Stop", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HumanReaderStatusChip(status: HumanReaderChapterStatus) {
+    val containerColor = when (status.label) {
+        "Ready", "Ready from here" -> MaterialTheme.colorScheme.primaryContainer
+        "Failed" -> MaterialTheme.colorScheme.errorContainer
+        "Queued" -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.tertiaryContainer
+    }
+    val contentColor = when (status.label) {
+        "Failed" -> MaterialTheme.colorScheme.onErrorContainer
+        "Queued" -> MaterialTheme.colorScheme.onSecondaryContainer
+        "Ready", "Ready from here" -> MaterialTheme.colorScheme.onPrimaryContainer
+        else -> MaterialTheme.colorScheme.onTertiaryContainer
+    }
+
+    Surface(
+        color = containerColor,
+        contentColor = contentColor,
+        shape = RoundedCornerShape(50)
+    ) {
+        Text(
+            humanReaderStatusLabel(status).replaceFirstChar { it.uppercase() },
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
 }
 
 @Composable
