@@ -3,75 +3,70 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Privacy Policy — OnDeviceReaderAI</title>
+    <title>Privacy Policy - OnDeviceReaderAI</title>
     <style>
-        body { font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; line-height: 1.7; color: #1a1a2e; background: #fafafa; }
-        h1 { color: #6C63FF; margin-bottom: 4px; }
-        h2 { color: #333; margin-top: 32px; border-bottom: 1px solid #eee; padding-bottom: 8px; }
-        .date { color: #888; font-size: 14px; margin-bottom: 24px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 760px; margin: 40px auto; padding: 0 20px; line-height: 1.65; color: #1f2430; background: #fafafa; }
+        h1 { color: #4f46e5; margin-bottom: 4px; }
+        h2 { color: #202436; margin-top: 32px; border-bottom: 1px solid #e8e8ef; padding-bottom: 8px; }
+        .date { color: #667085; font-size: 14px; margin-bottom: 24px; }
         ul { padding-left: 24px; }
         li { margin-bottom: 8px; }
-        .summary { background: #f0f0f5; border-radius: 8px; padding: 16px 20px; margin-top: 32px; }
-        .summary h2 { border: none; margin-top: 0; }
-        a { color: #6C63FF; }
+        a { color: #4f46e5; }
     </style>
 </head>
 <body>
     <h1>Privacy Policy</h1>
-    <p class="date">Effective Date: May 11, 2026 &middot; Last Updated: May 11, 2026</p>
+    <p class="date">Effective Date: May 16, 2026 | Last Updated: May 16, 2026</p>
 
     <h2>Overview</h2>
-    <p>OnDeviceReaderAI ("the App") is a document reader with AI-powered text-to-speech. We are committed to protecting your privacy. This policy explains what data the App collects, how it is used, and your rights.</p>
+    <p>OnDeviceReaderAI is a document reader with local text-to-speech and on-device OCR features. This policy explains what data the app uses and how it is handled.</p>
 
     <h2>Data Collection</h2>
-    <p><strong>We do not collect, store, or transmit any personal data.</strong></p>
+    <p>OnDeviceReaderAI does not operate an account system, advertising network, analytics backend, cloud text-to-speech service, or document-processing server. We do not sell your data, and your imported books and documents are not uploaded to our servers.</p>
     <ul>
-        <li><strong>No accounts required.</strong> The App does not require registration or login.</li>
-        <li><strong>No analytics or tracking.</strong> We do not use analytics SDKs, advertising trackers, or any third-party data collection tools.</li>
-        <li><strong>No cloud processing.</strong> All text-to-speech processing happens entirely on your device using local AI models. Your books and documents are never uploaded to any server.</li>
-        <li><strong>No personal information collected.</strong> We do not collect names, email addresses, device identifiers, or any other personal information.</li>
+        <li>No account is required.</li>
+        <li>No advertising SDKs are included.</li>
+        <li>No cloud text-to-speech is used by the app.</li>
+        <li>Books and documents are not uploaded to our servers.</li>
     </ul>
+    <p>The app does include platform and SDK components that may handle limited data as part of their normal operation:</p>
+    <ul>
+        <li>Google ML Kit on-device OCR may collect device information, app information, per-installation identifiers, performance metrics, API configuration, event types, and error codes for diagnostics and usage analytics. ML Kit states that OCR input data and OCR output data are processed on device and are not sent to Google servers by the ML Kit API.</li>
+        <li>Instant Reader sends text selected for speech to the Android text-to-speech engine selected on your device. That engine may be provided by Google, Samsung, or another Android TTS provider and is governed by that provider's settings and privacy practices.</li>
+        <li>Google Play Billing handles Pro purchases. The app receives purchase status needed to unlock Pro and stores that entitlement locally.</li>
+    </ul>
+
+    <h2>Local Processing</h2>
+    <p>The app processes selected documents on your device.</p>
+    <ul>
+        <li>Imported ePub, PDF, and HTML files are copied into app storage.</li>
+        <li>Reading progress, favorites, bookmarks, highlights, and preferences are stored locally.</li>
+        <li>On-device OCR may be used to read scanned or image-based PDF pages aloud.</li>
+        <li>Human Reader audio is prepared and cached locally on your device.</li>
+    </ul>
+    <p>This local data is deleted when the app is uninstalled. Android app-data backup is disabled for OnDeviceReaderAI, so imported books, prepared audio, preferences, and local Pro cache are not included in Android Auto Backup by the app.</p>
 
     <h2>Network Access</h2>
-    <p>The App requires internet access solely for downloading voice models. When you choose to download a text-to-speech voice model, the App downloads model files from GitHub (github.com/k2-fsa/sherpa-onnx). No personal data is transmitted during these downloads.</p>
-    <p>After a voice model is downloaded, the App functions fully offline.</p>
-
-    <h2>Local Data Storage</h2>
-    <p>The App stores the following data locally on your device only:</p>
-    <ul>
-        <li><strong>Imported books and documents</strong> — copied to App internal storage when you import them.</li>
-        <li><strong>Reading progress, bookmarks, and highlights</strong> — stored in a local database on your device.</li>
-        <li><strong>User preferences</strong> — reading theme, font size, voice selection, and other settings.</li>
-        <li><strong>Downloaded voice models</strong> — stored in App internal storage.</li>
-    </ul>
-    <p>This data is never transmitted off your device. If you uninstall the App, all local data is deleted.</p>
+    <p>The app uses internet access for optional voice-model downloads, Google Play Billing, and SDK/platform maintenance such as ML Kit diagnostics or model updates.</p>
+    <p>When you choose to download a Human Reader or optional local voice model, the app downloads open-source model files from GitHub-hosted sherpa-onnx release assets. These downloads do not include your books or reading content.</p>
+    <p>Instant Reader uses the local text-to-speech engine installed on your Android device. Depending on your device and system settings, that engine may be provided by Google, Samsung, or another Android text-to-speech provider. OnDeviceReaderAI does not send your documents to our servers.</p>
+    <p>After required voice models are downloaded, the app can read documents without an internet connection.</p>
 
     <h2>File Access</h2>
-    <p>The App requests permission to read files from your device solely to import documents (ePub, PDF, HTML) that you choose to open. The App does not scan, index, or access any files you have not explicitly selected.</p>
+    <p>The app uses Android's document picker and file-open intents so you can choose ePub, PDF, HTML, or XHTML files. The app does not scan your device storage and does not access files you did not select.</p>
 
-    <h2>Third-Party Services</h2>
-    <p>The App does not integrate with any third-party services, advertising networks, or analytics platforms. The only external network requests are to download open-source voice model files from GitHub.</p>
+    <h2>Third-Party Components</h2>
+    <p>The app uses Android, Google Play Billing, Google ML Kit, and open-source components for document parsing, rendering, text-to-speech, OCR, and local audio preparation.</p>
+    <p>Open-source license notices are available at <a href="open-source-notices.html">open-source-notices.html</a>.</p>
 
     <h2>Children's Privacy</h2>
-    <p>The App does not knowingly collect any data from children under 13. Since the App collects no personal data from any user, it is compliant with COPPA requirements.</p>
+    <p>The app does not knowingly collect personal data from children. Because the app does not collect personal data from any user, no child personal data is transmitted to us.</p>
 
     <h2>Changes to This Policy</h2>
-    <p>We may update this Privacy Policy from time to time. Changes will be posted on this page and will take effect immediately upon posting.</p>
+    <p>We may update this Privacy Policy from time to time. Changes will be posted at the privacy policy URL and will take effect when posted.</p>
 
     <h2>Contact</h2>
-    <p>If you have questions about this Privacy Policy, please contact:</p>
+    <p>If you have questions about this Privacy Policy, contact:</p>
     <p><strong>Email:</strong> <a href="mailto:curry.tom.e@gmail.com">curry.tom.e@gmail.com</a></p>
-
-    <div class="summary">
-        <h2>Summary</h2>
-        <ul>
-            <li>No data collection</li>
-            <li>No tracking or analytics</li>
-            <li>No cloud processing — all AI runs on-device</li>
-            <li>No accounts or registration</li>
-            <li>Internet used only for optional voice model downloads</li>
-            <li>All data stays on your device</li>
-        </ul>
-    </div>
 </body>
 </html>

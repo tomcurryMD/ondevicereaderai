@@ -1,71 +1,68 @@
-# Privacy Policy — OnDeviceReaderAI
+# Privacy Policy - OnDeviceReaderAI
 
-**Effective Date:** May 11, 2026
-**Last Updated:** May 11, 2026
+**Effective Date:** May 16, 2026
+**Last Updated:** May 16, 2026
 
 ## Overview
 
-OnDeviceReaderAI ("the App") is a document reader with AI-powered text-to-speech. We are committed to protecting your privacy. This policy explains what data the App collects, how it is used, and your rights.
+OnDeviceReaderAI is a document reader with local text-to-speech and on-device OCR features. This policy explains what data the app uses and how it is handled.
 
 ## Data Collection
 
-**We do not collect, store, or transmit any personal data.**
+OnDeviceReaderAI does not operate an account system, advertising network, analytics backend, cloud text-to-speech service, or document-processing server. We do not sell your data, and your imported books and documents are not uploaded to our servers.
 
-Specifically:
+- No account is required.
+- No advertising SDKs are included.
+- No cloud text-to-speech is used by the app.
+- Books and documents are not uploaded to our servers.
 
-- **No accounts required.** The App does not require registration or login.
-- **No analytics or tracking.** We do not use analytics SDKs, advertising trackers, or any third-party data collection tools.
-- **No cloud processing.** All text-to-speech processing happens entirely on your device using local AI models. Your books and documents are never uploaded to any server.
-- **No personal information collected.** We do not collect names, email addresses, device identifiers, or any other personal information.
+The app does include platform and SDK components that may handle limited data as part of their normal operation:
+
+- Google ML Kit on-device OCR may collect device information, app information, per-installation identifiers, performance metrics, API configuration, event types, and error codes for diagnostics and usage analytics. ML Kit states that OCR input data and OCR output data are processed on device and are not sent to Google servers by the ML Kit API.
+- Instant Reader sends text selected for speech to the Android text-to-speech engine selected on your device. That engine may be provided by Google, Samsung, or another Android TTS provider and is governed by that provider's settings and privacy practices.
+- Google Play Billing handles Pro purchases. The app receives purchase status needed to unlock Pro and stores that entitlement locally.
+
+## Local Processing
+
+The app processes selected documents on your device.
+
+- Imported ePub, PDF, and HTML files are copied into app storage.
+- Reading progress, favorites, bookmarks, highlights, and preferences are stored locally.
+- On-device OCR may be used to read scanned or image-based PDF pages aloud.
+- Human Reader audio is prepared and cached locally on your device.
+
+This local data is deleted when the app is uninstalled. Android app-data backup is disabled for OnDeviceReaderAI, so imported books, prepared audio, preferences, and local Pro cache are not included in Android Auto Backup by the app.
 
 ## Network Access
 
-The App requires internet access solely for the following purpose:
+The app uses internet access for optional voice-model downloads, Google Play Billing, and SDK/platform maintenance such as ML Kit diagnostics or model updates.
 
-- **Downloading voice models.** When you choose to download a text-to-speech voice model, the App downloads model files from GitHub (github.com/k2-fsa/sherpa-onnx). No personal data is transmitted during these downloads.
+When you choose to download a Human Reader or optional local voice model, the app downloads open-source model files from GitHub-hosted sherpa-onnx release assets. These downloads do not include your books or reading content.
 
-After a voice model is downloaded, the App functions fully offline.
+Instant Reader uses the local text-to-speech engine installed on your Android device. Depending on your device and system settings, that engine may be provided by Google, Samsung, or another Android text-to-speech provider. OnDeviceReaderAI does not send your documents to our servers.
 
-## Local Data Storage
-
-The App stores the following data locally on your device only:
-
-- **Imported books and documents** — copied to App internal storage when you import them.
-- **Reading progress, bookmarks, and highlights** — stored in a local database on your device.
-- **User preferences** — reading theme, font size, voice selection, and other settings.
-- **Downloaded voice models** — stored in App internal storage.
-
-This data is never transmitted off your device. If you uninstall the App, all local data is deleted.
+After required voice models are downloaded, the app can read documents without an internet connection.
 
 ## File Access
 
-The App requests permission to read files from your device solely to import documents (ePub, PDF, HTML) that you choose to open. The App does not scan, index, or access any files you have not explicitly selected.
+The app uses Android's document picker and file-open intents so you can choose ePub, PDF, HTML, or XHTML files. The app does not scan your device storage and does not access files you did not select.
 
-## Third-Party Services
+## Third-Party Components
 
-The App does not integrate with any third-party services, advertising networks, or analytics platforms.
+The app uses Android, Google Play Billing, Google ML Kit, and open-source components for document parsing, rendering, text-to-speech, OCR, and local audio preparation. Open-source license notices are available at:
 
-The only external network requests are to download open-source voice model files from GitHub, as described above.
+https://github.com/tomcurryMD/ondevicereaderai/blob/codex/part-2-human-reader/OPEN_SOURCE_NOTICES.md
 
 ## Children's Privacy
 
-The App does not knowingly collect any data from children under 13. Since the App collects no personal data from any user, it is compliant with COPPA requirements.
+The app does not knowingly collect personal data from children. Because the app does not collect personal data from any user, no child personal data is transmitted to us.
 
 ## Changes to This Policy
 
-We may update this Privacy Policy from time to time. Changes will be posted in the App's repository and will take effect immediately upon posting.
+We may update this Privacy Policy from time to time. Changes will be posted at the privacy policy URL and will take effect when posted.
 
 ## Contact
 
-If you have questions about this Privacy Policy, please contact:
+If you have questions about this Privacy Policy, contact:
 
 **Email:** curry.tom.e@gmail.com
-
-## Summary
-
-- No data collection
-- No tracking or analytics
-- No cloud processing — all AI runs on-device
-- No accounts or registration
-- Internet used only for optional voice model downloads
-- All data stays on your device

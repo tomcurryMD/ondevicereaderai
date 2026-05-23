@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Open Source Notices - OnDeviceReaderAI</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 820px; margin: 40px auto; padding: 0 20px; line-height: 1.65; color: #1f2430; background: #fafafa; }
+        h1 { color: #4f46e5; margin-bottom: 4px; }
+        h2 { color: #202436; margin-top: 32px; border-bottom: 1px solid #e8e8ef; padding-bottom: 8px; }
+        ul { padding-left: 24px; }
+        li { margin-bottom: 8px; }
+        a { color: #4f46e5; }
+    </style>
+</head>
+<body>
+    <h1>Open Source Notices</h1>
+    <p>OnDeviceReaderAI uses Android, Google, and open-source components for document parsing, reading, on-device OCR, local text-to-speech, and Google Play Billing.</p>
+
+    <h2>Core Android and Google Components</h2>
+    <ul>
+        <li>Android platform and AndroidX Jetpack libraries, including Compose, Activity, Lifecycle, Navigation, Room, DataStore, WebKit, Media, and SplashScreen: Apache License 2.0 unless otherwise stated by the Android Open Source Project or AndroidX artifact metadata.</li>
+        <li>Kotlin standard library and Kotlin coroutines: Apache License 2.0.</li>
+        <li>Google Play Billing Library: Google Play Billing and Android SDK terms.</li>
+        <li>Google ML Kit Text Recognition: Google APIs Terms of Service and ML Kit Terms.</li>
+    </ul>
+
+    <h2>Open-Source Libraries</h2>
+    <ul>
+        <li>Coil: Apache License 2.0.</li>
+        <li>Accompanist: Apache License 2.0.</li>
+        <li>Apache PDFBox for Android / FontBox resources: Apache License 2.0.</li>
+        <li>Apache Commons Compress: Apache License 2.0.</li>
+        <li>jspecify: Apache License 2.0.</li>
+        <li>epublib-core: LGPL 2.1 or later.</li>
+        <li>jsoup: MIT License.</li>
+        <li>SLF4J Android: MIT License, copyright (c) 2004-2022 QOS.ch Sarl.</li>
+        <li>sherpa-onnx: Apache License 2.0.</li>
+    </ul>
+
+    <h2>LGPL Notice</h2>
+    <p>epublib-core is licensed under the GNU Lesser General Public License (LGPL). OnDeviceReaderAI uses the unmodified Maven artifact <code>nl.siegmann.epublib:epublib-core:3.1</code>. Users may replace or relink the LGPL component as permitted by the LGPL. Corresponding source is available from the upstream epublib project and Maven Central artifact metadata.</p>
+
+    <h2>Apache NOTICE Texts</h2>
+    <p><strong>Apache Commons Compress:</strong></p>
+    <blockquote>
+        <p>Apache Commons Compress<br>
+        Copyright 2002-2024 The Apache Software Foundation</p>
+        <p>This product includes software developed at<br>
+        The Apache Software Foundation (https://www.apache.org/).</p>
+    </blockquote>
+    <p><strong>Apache PDFBox / FontBox:</strong></p>
+    <blockquote>
+        <p>Apache PDFBox and FontBox resources are developed by The Apache Software Foundation and distributed under the Apache License 2.0. PDFBox for Android is an Android port of Apache PDFBox.</p>
+    </blockquote>
+
+    <h2>Local Voice Models and Speech Assets</h2>
+    <ul>
+        <li>Piper / rhasspy Piper: MIT License.</li>
+        <li>rhasspy/piper-voices voice packs used by the app, including Lessac, Ryan, Amy, LibriTTS, and Alba model packs: upstream repository license is MIT; individual voice/model cards may include additional dataset notes.</li>
+        <li>Kokoro English v0.19 model pack used for Human Reader: Apache License 2.0.</li>
+        <li>eSpeak NG data used by Piper/sherpa-onnx voice packs is included through upstream sherpa-onnx model assets and remains subject to upstream notices.</li>
+    </ul>
+
+    <h2>References</h2>
+    <ul>
+        <li><a href="https://www.apache.org/licenses/LICENSE-2.0">Apache License 2.0</a></li>
+        <li><a href="https://opensource.org/license/mit">MIT License</a></li>
+        <li><a href="https://developers.google.com/ml-kit/terms">Google ML Kit Terms</a></li>
+        <li><a href="https://developer.android.com/google/play/billing">Google Play Billing</a></li>
+        <li><a href="https://huggingface.co/rhasspy/piper-voices">Piper voices</a></li>
+        <li><a href="https://huggingface.co/hexgrad/kLegacy/blob/main/v0.19/README.md">Kokoro v0.19 model card</a></li>
+    </ul>
+
+    <p>This notice is provided for launch transparency and should be updated whenever dependencies or downloadable model packs change.</p>
+</body>
+</html>
